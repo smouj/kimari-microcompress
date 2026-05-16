@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Reproducible benchmark script for small Hugging Face models.
+"""Reproducible benchmark script for GGUF model files.
 
 Usage:
-    python scripts/bench_real_small_model.py ./models/tiny-gpt2 --output reports/tiny-gpt2.md
+    python scripts/bench_real_gguf.py ./models/tiny.gguf --output reports/tiny-gguf.md
 
-This script runs KMC benchmarks on a local small model directory.
+This script runs KMC benchmarks on a local GGUF file with --gguf-aware mode.
 It does NOT download models automatically.
 It generates JSON, Markdown table, and environment metadata.
 It does NOT invent results.
@@ -18,49 +18,67 @@ import sys
 import time
 from pathlib import Path
 
-# Add project src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from kmc.archive import DEFAULT_BLOCK_SIZE, pack, unpack, verify_quick
 from kmc.benchmark import _get_environment_info
 
 
-def run_small_model_benchmark(model_path: Path, output_path: Path | None = None) -> dict:
-    """Run benchmark on a small model directory.
+def run_gguf_benchmark(gguf_path: Path, output_path: Path | None = None) -> dict:
+    """Run benchmark on a GGUF file.
 
     Args:
-        model_path: Path to the model directory.
+        gguf_path: Path to the GGUF file.
         output_path: Optional path to write Markdown report.
 
     Returns:
         Dict with benchmark results.
     """
-    if not model_path.exists():
-        print(f"Error: model path not found: {model_path}", file=sys.stderr)
+    if not gguf_path.exists():
+        print(f"Error: GGUF file not found: {gguf_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Collect file info
-    files = list(model_path.rglob("*"))
-    files = [f for f in files if f.is_file()]
-    total_size = sum(f.stat().st_size for f in files)
+    if not gguf_path.is_file():
+        print(
+            f"Error: expected a file, got directory: {gguf_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    print(f"Benchmarking: {model_path}")
-    print(f"Files: {len(files)}")
-    print(f"Total size: {total_size:,} bytes")
+    original_size = gguf_path.stat().st_size
+    print(f"Benchmarking GGUF: {gguf_path}")
+    print(f"Size: {original_size:,} bytes")
 
-    # Create temp archive
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        archive_path = Path(tmpdir) / "benchmark.kmc"
+        archive_path = Path(tmpdir) / "gguf_benchmark.kmc"
 
-        # Pack
+        # Pack with gguf_aware
         t0 = time.perf_counter()
-        pack(model_path, archive_path, block_size=DEFAULT_BLOCK_SIZE)
+        pack(
+            gguf_path,
+            archive_path,
+            block_size=DEFAULT_BLOCK_SIZE,
+            gguf_aware=True,
+        )
         pack_time = time.perf_counter() - t0
 
         compressed_size = archive_path.stat().st_size
-        ratio = compressed_size / total_size if total_size > 0 else 0
+        ratio = compressed_size / original_size if original_size > 0 else 0
+
+        # Pack without gguf_aware for comparison
+        archive_naive = Path(tmpdir) / "gguf_naive.kmc"
+        t0 = time.perf_counter()
+        pack(
+            gguf_path,
+            archive_naive,
+            block_size=DEFAULT_BLOCK_SIZE,
+            gguf_aware=False,
+        )
+        naive_pack_time = time.perf_counter() - t0
+        naive_compressed_size = archive_naive.stat().st_size
+        naive_ratio = naive_compressed_size / original_size if original_size > 0 else 0
 
         # Verify
         t0 = time.perf_counter()
@@ -73,20 +91,23 @@ def run_small_model_benchmark(model_path: Path, output_path: Path | None = None)
         unpack(archive_path, restore_dir)
         unpack_time = time.perf_counter() - t0
 
-    # Environment info
     env_info = _get_environment_info()
 
     results = {
-        "model_path": str(model_path),
-        "total_files": len(files),
-        "original_size": total_size,
-        "compressed_size": compressed_size,
-        "ratio": ratio,
-        "pack_time_s": round(pack_time, 4),
+        "gguf_path": str(gguf_path),
+        "original_size": original_size,
+        "gguf_aware": {
+            "compressed_size": compressed_size,
+            "ratio": ratio,
+            "pack_time_s": round(pack_time, 4),
+        },
+        "naive": {
+            "compressed_size": naive_compressed_size,
+            "ratio": naive_ratio,
+            "pack_time_s": round(naive_pack_time, 4),
+        },
         "verify_time_s": round(verify_time, 4),
         "unpack_time_s": round(unpack_time, 4),
-        "pack_throughput_bs": round(total_size / pack_time) if pack_time > 0 else 0,
-        "unpack_throughput_bs": round(total_size / unpack_time) if unpack_time > 0 else 0,
         "environment": {
             "python_version": env_info.python_version,
             "os": f"{env_info.os_name} {env_info.os_version}",
@@ -100,11 +121,9 @@ def run_small_model_benchmark(model_path: Path, output_path: Path | None = None)
         ),
     }
 
-    # Write output
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _write_markdown_report(results, output_path)
-        # Also write JSON
         json_path = output_path.with_suffix(".json")
         json_path.write_text(json.dumps(results, indent=2, ensure_ascii=False))
         print(f"Report saved to {output_path}")
@@ -114,28 +133,32 @@ def run_small_model_benchmark(model_path: Path, output_path: Path | None = None)
 
 
 def _write_markdown_report(results: dict, path: Path) -> None:
-    """Write a Markdown benchmark report."""
+    """Write a Markdown benchmark report for GGUF."""
     env = results["environment"]
+    ga = results["gguf_aware"]
+    na = results["naive"]
     lines = [
-        "# KMC Benchmark Report",
+        "# KMC GGUF Benchmark Report",
         "",
-        f"**Model**: `{results['model_path']}`",
+        f"**File**: `{results['gguf_path']}`",
         f"**KMC Version**: {env['kmc_version']}",
         f"**Date**: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
         "",
-        "## Results",
+        "## GGUF-aware vs Naive",
+        "",
+        "| Metric | GGUF-aware | Naive |",
+        "|--------|-----------|-------|",
+        f"| Compressed size | {ga['compressed_size']:,} bytes | {na['compressed_size']:,} bytes |",
+        f"| Ratio | {ga['ratio']:.2%} | {na['ratio']:.2%} |",
+        f"| Pack time | {ga['pack_time_s']:.3f}s | {na['pack_time_s']:.3f}s |",
+        "",
+        "## General",
         "",
         "| Metric | Value |",
         "|--------|-------|",
         f"| Original size | {results['original_size']:,} bytes |",
-        f"| Compressed size | {results['compressed_size']:,} bytes |",
-        f"| Ratio | {results['ratio']:.2%} |",
-        f"| Files | {results['total_files']} |",
-        f"| Pack time | {results['pack_time_s']:.3f}s |",
         f"| Verify time | {results['verify_time_s']:.3f}s |",
         f"| Unpack time | {results['unpack_time_s']:.3f}s |",
-        f"| Pack throughput | {results['pack_throughput_bs'] / 1024 / 1024:.2f} MB/s |",
-        f"| Unpack throughput | {results['unpack_throughput_bs'] / 1024 / 1024:.2f} MB/s |",
         "",
         "## Environment",
         "",
@@ -157,12 +180,12 @@ def _write_markdown_report(results: dict, path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark KMC on a small model")
-    parser.add_argument("model_path", type=Path, help="Path to local model directory")
+    parser = argparse.ArgumentParser(description="Benchmark KMC on a GGUF file")
+    parser.add_argument("gguf_path", type=Path, help="Path to local GGUF file")
     parser.add_argument("--output", type=Path, default=None, help="Output Markdown report path")
     args = parser.parse_args()
 
-    run_small_model_benchmark(args.model_path, args.output)
+    run_gguf_benchmark(args.gguf_path, args.output)
 
 
 if __name__ == "__main__":

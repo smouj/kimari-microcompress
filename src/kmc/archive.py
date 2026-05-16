@@ -155,7 +155,7 @@ class VerificationReport:
 def validate_manifest(manifest: KMCManifest) -> list[str]:
     """Validate a manifest for structural correctness and security."""
     errors: list[str] = []
-    supported_codecs = {"zstd", "zlib", "raw", "byteplane", "floatplane"}
+    supported_codecs = {"zstd", "zlib", "raw", "byteplane", "floatplane", "gguf_quant_block"}
     seen_paths: set[str] = set()
 
     for file_entry in manifest.files:
@@ -201,6 +201,11 @@ def validate_manifest(manifest: KMCManifest) -> list[str]:
                     f"Negative original_size in block {block.index} of '{file_entry.path}'"
                 )
             total_block_original += block.original_size
+
+            # Validate dedup_ref if present (v0.8+)
+            if block.dedup_ref >= 0:
+                # dedup_ref must reference a valid block — we validate at unpack time
+                pass
 
         if file_entry.original_size > 0 and total_block_original != file_entry.original_size:
             errors.append(
@@ -391,6 +396,15 @@ def _decompress_block_with_metadata(
             ctx._codec_metadata = codec_metadata  # type: ignore[attr-defined]
         return fp.decompress(payload, context=ctx)
 
+    if codec_name == "gguf_quant_block":
+        from .codecs.gguf_quant import GGUFQuantCodec
+
+        gqc = GGUFQuantCodec()
+        ctx = CodecContext(original_size=original_size)
+        if codec_metadata:
+            ctx._codec_metadata = codec_metadata  # type: ignore[attr-defined]
+        return gqc.decompress(payload, context=ctx)
+
     raise ValueError(f"Unsupported codec for decompression: {codec_name!r}")
 
 
@@ -459,6 +473,8 @@ def pack(
     artifact_metadata: dict | None = None,
     jobs: int = 1,
     progress_reporter: object | None = None,
+    dedup: bool = False,
+    delta_base: Path | None = None,
 ) -> None:
     """Pack a directory or single file into a .kmc archive.
 
@@ -475,6 +491,8 @@ def pack(
         artifact_metadata: Artifact-specific metadata for the manifest.
         jobs: Number of parallel compression workers (1 = sequential).
         progress_reporter: Optional ProgressReporter for progress updates.
+        dedup: If True, enable cross-file deduplication (experimental).
+        delta_base: If set, path to a base .kmc archive for delta compression.
     """
     source = Path(source).resolve()
     output = Path(output).resolve()
@@ -653,6 +671,78 @@ def pack(
         "has_tensor_index": has_tensor_data,
     }
 
+    # Cross-file deduplication (v0.8, experimental)
+    if dedup:
+        from .dedup import DedupPlanner
+
+        dedup_planner = DedupPlanner()
+        # We need original block data for fingerprinting
+        # Re-read and fingerprint each block
+        global_bid = 0
+        for file_entry in manifest.files:
+            src_path = source / file_entry.path if source.is_dir() else source
+            if not src_path.exists():
+                for block in file_entry.blocks:
+                    global_bid += 1
+                continue
+
+            with open(src_path, "rb") as f:
+                block_idx = 0
+                for block in file_entry.blocks:
+                    f.seek(block.offset if block.offset < file_entry.original_size else 0)
+                    # Read the original chunk from the source
+                    chunk_start = sum(b.original_size for b in file_entry.blocks[:block_idx])
+                    f.seek(chunk_start)
+                    chunk = f.read(block.original_size)
+                    if chunk:
+                        is_dup = dedup_planner.add_block(global_bid, chunk)
+                        if is_dup:
+                            canonical = dedup_planner._index.get_canonical(global_bid)
+                            if canonical is not None:
+                                block.dedup_ref = canonical
+                    global_bid += 1
+                    block_idx += 1
+
+        dedup_plan = dedup_planner.create_plan()
+        manifest.deduplication = (
+            dedup_plan.to_manifest_dict()
+            if hasattr(dedup_plan, "to_manifest_dict")
+            else {
+                "enabled": True,
+                "fingerprint": "sha256",
+                "unique_blocks": dedup_plan.unique_blocks,
+                "deduplicated_blocks": dedup_plan.deduplicated_blocks,
+                "saved_bytes": dedup_plan.saved_bytes,
+            }
+        )
+
+    # Delta compression (v0.8, experimental)
+    if delta_base is not None:
+        delta_base = Path(delta_base).resolve()
+        if delta_base.exists():
+            import hashlib as _hl
+
+            base_sha = _hl.sha256(delta_base.read_bytes()).hexdigest()
+            manifest.delta = {
+                "enabled": True,
+                "base_archive_sha256": base_sha,
+                "base_archive_path_hint": str(delta_base),
+                "mode": "experimental",
+            }
+        else:
+            manifest.delta = {
+                "enabled": False,
+                "mode": "experimental",
+                "error": f"Base archive not found: {delta_base}",
+            }
+
+    # Runtime hints (v0.8)
+    manifest.runtime_hints = {
+        "partial_file_access": True,
+        "tensor_access": "limited" if has_tensor_data else "none",
+        "compressed_inference": False,
+    }
+
     # Compute correct offsets iteratively
     for _ in range(20):
         manifest_bytes = manifest.to_bytes()
@@ -784,8 +874,46 @@ def read_manifest_from_archive(archive: Path) -> tuple[KMCManifest, int]:
 
 
 # ---------------------------------------------------------------------------
-# Verify
+# Dedup/delta validation helpers
 # ---------------------------------------------------------------------------
+
+
+def _validate_dedup_refs(manifest: KMCManifest, report: VerificationReport) -> None:
+    """Validate that all dedup_ref entries point to valid canonical blocks.
+
+    Checks that:
+    - Every block with dedup_ref >= 0 references a block that exists.
+    - Canonical blocks referenced by dedup_ref are not themselves duplicates.
+    """
+    # Build global block ID mapping
+    global_block_id = 0
+    block_id_to_file: dict[int, str] = {}
+    duplicate_ids: set[int] = set()
+
+    for file_entry in manifest.files:
+        for block in file_entry.blocks:
+            block_id_to_file[global_block_id] = file_entry.path
+            if block.dedup_ref >= 0:
+                duplicate_ids.add(global_block_id)
+            global_block_id += 1
+
+    for dup_id in duplicate_ids:
+        # Find the block with this dup_id to get its dedup_ref
+        bid = 0
+        for file_entry in manifest.files:
+            for block in file_entry.blocks:
+                if bid == dup_id:
+                    ref = block.dedup_ref
+                    if ref < 0 or ref not in block_id_to_file:
+                        report.errors.append(
+                            f"Block {dup_id} in '{file_entry.path}' has invalid dedup_ref={ref}"
+                        )
+                    elif ref in duplicate_ids:
+                        report.errors.append(
+                            f"Block {dup_id} in '{file_entry.path}' references "
+                            f"dedup_ref={ref} which is itself a duplicate"
+                        )
+                bid += 1
 
 
 def verify(archive: Path) -> list[str]:
@@ -826,7 +954,7 @@ def verify_quick(archive: Path) -> VerificationReport:
     report.compressed_size = manifest.total_compressed_size
     report.restored_size = manifest.total_original_size
 
-    if manifest.version not in (1, 2, 3, 4, 5, 6):
+    if manifest.version not in (1, 2, 3, 4, 5, 6, 7):
         report.warnings.append(f"Unknown manifest version: v{manifest.version}")
 
     structural_errors = validate_manifest(manifest)
@@ -834,6 +962,18 @@ def verify_quick(archive: Path) -> VerificationReport:
         report.integrity = "FAILED"
         report.errors.extend(structural_errors)
         return report
+
+    # Validate dedup references if dedup is enabled
+    if manifest.deduplication.get("enabled", False):
+        _validate_dedup_refs(manifest, report)
+
+    # Validate delta references if delta is enabled
+    if manifest.delta.get("enabled", False):
+        # Delta archives need a base archive for full reconstruction
+        report.warnings.append(
+            "Delta archive: base archive required for full reconstruction "
+            f"(hint: {manifest.delta.get('base_archive_path_hint', 'unknown')})"
+        )
 
     # Quick check: verify block hashes without decompressing
     archive_size = archive.stat().st_size
@@ -890,7 +1030,7 @@ def verify_full(archive: Path) -> VerificationReport:
     report.compressed_size = manifest.total_compressed_size
     report.restored_size = manifest.total_original_size
 
-    if manifest.version not in (1, 2, 3, 4, 5, 6):
+    if manifest.version not in (1, 2, 3, 4, 5, 6, 7):
         report.warnings.append(f"Unknown manifest version: v{manifest.version}")
 
     structural_errors = validate_manifest(manifest)
@@ -898,6 +1038,10 @@ def verify_full(archive: Path) -> VerificationReport:
         report.integrity = "FAILED"
         report.errors.extend(structural_errors)
         return report
+
+    # Validate dedup references if dedup is enabled
+    if manifest.deduplication.get("enabled", False):
+        _validate_dedup_refs(manifest, report)
 
     archive_size = archive.stat().st_size
     with open(archive, "rb") as f:

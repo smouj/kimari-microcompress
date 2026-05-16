@@ -291,7 +291,7 @@ class TestKMCReader:
         with KMCReader(archive) as reader:
             manifest = reader.get_manifest()
             assert isinstance(manifest, KMCManifest)
-            assert manifest.version == 6
+            assert manifest.version == 7
 
     def test_reader_get_file_info(self, tmp_path: Path) -> None:
         """KMCReader can return file metadata."""
@@ -390,9 +390,9 @@ class TestKMCReader:
 class TestManifestV6:
     """Tests for manifest v6 (v0.7) features."""
 
-    def test_manifest_version_is_6(self) -> None:
-        """KMC_MANIFEST_VERSION is 6."""
-        assert KMC_MANIFEST_VERSION == 6
+    def test_manifest_version_is_7(self) -> None:
+        """KMC_MANIFEST_VERSION is 7."""
+        assert KMC_MANIFEST_VERSION == 7
 
     def test_default_index_field(self) -> None:
         """Default index field is empty dict."""
@@ -526,8 +526,13 @@ class TestSelectiveExtraction:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(tmp_path / "out"), "--list",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(tmp_path / "out"),
+                "--list",
             ],
             capture_output=True,
             text=True,
@@ -542,9 +547,14 @@ class TestSelectiveExtraction:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(tmp_path / "out"),
-                "--list", "--json",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(tmp_path / "out"),
+                "--list",
+                "--json",
             ],
             capture_output=True,
             text=True,
@@ -562,8 +572,14 @@ class TestSelectiveExtraction:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(out_dir), "--only", "config.json",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(out_dir),
+                "--only",
+                "config.json",
             ],
             capture_output=True,
             text=True,
@@ -580,8 +596,14 @@ class TestSelectiveExtraction:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(out_dir), "--only", "*.json",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(out_dir),
+                "--only",
+                "*.json",
             ],
             capture_output=True,
             text=True,
@@ -599,9 +621,15 @@ class TestSelectiveExtraction:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(out_dir),
-                "--only", "config.json", "--json",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(out_dir),
+                "--only",
+                "config.json",
+                "--json",
             ],
             capture_output=True,
             text=True,
@@ -620,8 +648,14 @@ class TestSelectiveExtraction:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(out_dir), "--only", "nonexistent*",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(out_dir),
+                "--only",
+                "nonexistent*",
             ],
             capture_output=True,
             text=True,
@@ -720,8 +754,14 @@ class TestPartialAccessSecurity:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(out_dir), "--only", "../evil",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(out_dir),
+                "--only",
+                "../evil",
             ],
             capture_output=True,
             text=True,
@@ -736,8 +776,14 @@ class TestPartialAccessSecurity:
 
         result = subprocess.run(
             [
-                "python", "-m", "kmc", "unpack",
-                str(archive), str(out_dir), "--only", "/etc/passwd",
+                "python",
+                "-m",
+                "kmc",
+                "unpack",
+                str(archive),
+                str(out_dir),
+                "--only",
+                "/etc/passwd",
             ],
             capture_output=True,
             text=True,

@@ -10,6 +10,7 @@ from __future__ import annotations
 from .base import Codec
 from .byteplane import BytePlaneCodec
 from .floatplane import FloatPlaneCodec
+from .gguf_quant import GGUFQuantCodec
 from .raw import RawCodec
 from .zlib_codec import ZlibCodec
 from .zstd_codec import ZstdCodec, is_zstd_available
@@ -21,6 +22,7 @@ _REGISTRY: dict[str, type[Codec]] = {
     "zstd": ZstdCodec,
     "byteplane": BytePlaneCodec,
     "floatplane": FloatPlaneCodec,
+    "gguf_quant_block": GGUFQuantCodec,
 }
 
 

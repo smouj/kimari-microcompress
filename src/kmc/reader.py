@@ -178,6 +178,13 @@ class KMCReader:
         slices the result. This is more efficient than reading the entire
         file when only a small portion is needed.
 
+        The algorithm:
+        1. Find the file's block list and their offsets within the file.
+        2. Determine which blocks overlap the [offset, offset+length) range.
+        3. Read and decompress only those blocks.
+        4. Verify block checksums.
+        5. Assemble the requested range from the decompressed blocks.
+
         Args:
             path: Relative path of the file.
             offset: Byte offset to start reading from.
@@ -202,13 +209,52 @@ class KMCReader:
         if offset >= file_loc.size:
             return b""
 
-        # Simple approach: read the full file and slice
-        # This is correct and avoids complex block-range math.
-        # For truly large files, a block-level optimization can be added later.
-        full_data = self.read_file(path)
+        # Clamp length to file size
+        effective_length = min(length, file_loc.size - offset)
+        if effective_length <= 0:
+            return b""
 
-        end = min(offset + length, len(full_data))
-        return full_data[offset:end]
+        # Get blocks for this file
+        blocks = self.block_index.get_blocks_for_file(path)
+        if not blocks:
+            raise ValueError(f"No blocks found for file: {path!r}")
+
+        # Compute block boundaries within the file
+        # Each block has original_size and we know their order
+        block_starts: list[int] = []
+        current_start = 0
+        for block in blocks:
+            block_starts.append(current_start)
+            current_start += block.original_size
+
+        # Find which blocks overlap the requested range [offset, offset+effective_length)
+        range_start = offset
+        range_end = offset + effective_length
+
+        first_block = -1
+        last_block = -1
+        for i, block_start in enumerate(block_starts):
+            block_end = block_start + blocks[i].original_size
+            if block_end > range_start and block_start < range_end:
+                if first_block == -1:
+                    first_block = i
+                last_block = i
+
+        if first_block == -1:
+            return b""
+
+        # Read and decompress only the needed blocks
+        result = b""
+        for i in range(first_block, last_block + 1):
+            block_loc = blocks[i]
+            block_data = self._read_and_decompress_block(block_loc)
+            result += block_data
+
+        # Extract the requested range from the assembled blocks
+        # The first needed byte is at: range_start - block_starts[first_block]
+        local_offset = range_start - block_starts[first_block]
+
+        return result[local_offset : local_offset + effective_length]
 
     def read_tensor(self, name: str) -> bytes:
         """Read and return the raw bytes of a tensor from the archive.

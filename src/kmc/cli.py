@@ -29,13 +29,15 @@ def cmd_pack(args: argparse.Namespace) -> None:
     gguf_aware = getattr(args, "gguf_aware", False)
     jobs = getattr(args, "jobs", 1)
     show_progress = getattr(args, "progress", False)
+    dedup = getattr(args, "dedup", False)
+    delta_base = getattr(args, "delta_base", None)
 
     if not source.exists():
         print(f"Error: source not found: {source}", file=sys.stderr)
         sys.exit(1)
 
     # Validate codec choice
-    valid_codecs = {"auto", "raw", "zlib", "zstd", "byteplane", "floatplane"}
+    valid_codecs = {"auto", "raw", "zlib", "zstd", "byteplane", "floatplane", "gguf_quant_block"}
     if codec not in valid_codecs:
         print(f"Error: unknown codec '{codec}'. Valid: {sorted(valid_codecs)}", file=sys.stderr)
         sys.exit(1)
@@ -44,10 +46,10 @@ def cmd_pack(args: argparse.Namespace) -> None:
     codec_str = f" --codec {codec}" if codec != "auto" else ""
     gguf_str = " (gguf-aware)" if gguf_aware else ""
     jobs_str = f" --jobs {jobs}" if jobs > 1 else ""
-    print(
-        f"Packing {source} -> {output}{mode_str}{codec_str}{gguf_str}{jobs_str} "
-        f"(block_size={block_size}, level={level})"
-    )
+    dedup_str = " --dedup" if dedup else ""
+    delta_str = f" --delta-base {delta_base}" if delta_base else ""
+    extras = f"{mode_str}{codec_str}{gguf_str}{jobs_str}{dedup_str}{delta_str}"
+    print(f"Packing {source} -> {output}{extras} (block_size={block_size}, level={level})")
 
     from .reporting import create_reporter
 
@@ -65,6 +67,8 @@ def cmd_pack(args: argparse.Namespace) -> None:
         gguf_aware=gguf_aware,
         jobs=jobs,
         progress_reporter=reporter,
+        dedup=dedup,
+        delta_base=Path(delta_base) if delta_base else None,
     )
     elapsed = time.time() - start
 
@@ -278,6 +282,9 @@ def cmd_inspect(args: argparse.Namespace) -> None:
     show_lora = getattr(args, "lora", False)
     show_checkpoint = getattr(args, "checkpoint", False)
     show_gguf = getattr(args, "gguf", False)
+    show_dedup = getattr(args, "dedup", False)
+    show_delta = getattr(args, "delta_info", False)
+    show_runtime_hints = getattr(args, "runtime_hints", False)
 
     # If it's a .kmc archive, show archive manifest
     if target.is_file() and target.suffix.lower() == ".kmc":
@@ -286,6 +293,9 @@ def cmd_inspect(args: argparse.Namespace) -> None:
             json_output=json_output,
             show_tensors=show_tensors,
             show_compression=show_compression,
+            show_dedup=show_dedup,
+            show_delta=show_delta,
+            show_runtime_hints=show_runtime_hints,
         )
     else:
         _inspect_model(
@@ -394,6 +404,9 @@ def _inspect_archive(
     json_output: bool = False,
     show_tensors: bool = False,
     show_compression: bool = False,
+    show_dedup: bool = False,
+    show_delta: bool = False,
+    show_runtime_hints: bool = False,
 ) -> None:
     """Display archive manifest information."""
     manifest = inspect(archive)
@@ -449,6 +462,13 @@ def _inspect_archive(
         # Add overall compression summary
         if show_compression:
             data["compression_summary"] = _get_overall_compression_summary(manifest)
+
+        if manifest.deduplication:
+            data["deduplication"] = manifest.deduplication
+        if manifest.delta:
+            data["delta"] = manifest.delta
+        if manifest.runtime_hints:
+            data["runtime_hints"] = manifest.runtime_hints
 
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return
@@ -532,6 +552,41 @@ def _inspect_archive(
     print("  Selective extraction: supported")
     print(f"  Tensor extraction: {tensor_status}")
     print()
+
+    # Show deduplication info (v0.8+)
+    if show_dedup or manifest.deduplication:
+        dedup = manifest.deduplication
+        print("Deduplication:")
+        if dedup.get("enabled"):
+            print("  Enabled: yes")
+            print(f"  Unique blocks: {dedup.get('unique_blocks', 0)}")
+            print(f"  Deduplicated blocks: {dedup.get('deduplicated_blocks', 0)}")
+            saved = dedup.get("saved_bytes", 0)
+            print(f"  Saved bytes: {_format_size(saved)}")
+        else:
+            print("  Enabled: no")
+        print()
+
+    # Show delta info (v0.8+)
+    if show_delta or manifest.delta:
+        delta = manifest.delta
+        print("Delta:")
+        if delta.get("enabled"):
+            print("  Enabled: yes")
+            print(f"  Mode: {delta.get('mode', 'unknown')}")
+            print(f"  Base archive: {delta.get('base_archive_path_hint', 'unknown')}")
+        else:
+            print("  Enabled: no")
+        print()
+
+    # Show runtime hints (v0.8+)
+    if show_runtime_hints or manifest.runtime_hints:
+        hints = manifest.runtime_hints
+        print("Runtime hints:")
+        print(f"  Partial file access: {hints.get('partial_file_access', 'no')}")
+        print(f"  Tensor access: {hints.get('tensor_access', 'none')}")
+        print(f"  Compressed inference: {hints.get('compressed_inference', False)}")
+        print()
 
     for fentry in manifest.files:
         print(f"  {fentry.path}")
@@ -1274,6 +1329,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show progress during operation",
     )
+    p_pack.add_argument(
+        "--dedup",
+        action="store_true",
+        help="Enable cross-file deduplication (experimental)",
+    )
+    p_pack.add_argument(
+        "--delta-base",
+        type=str,
+        default=None,
+        help="Path to base .kmc archive for delta compression (experimental)",
+    )
     p_pack.set_defaults(func=cmd_pack)
 
     # pack-lora
@@ -1408,6 +1474,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Inspect as GGUF model with tensor details",
     )
+    p_inspect.add_argument("--dedup", action="store_true", help="Show deduplication info")
+    p_inspect.add_argument(
+        "--delta",
+        action="store_true",
+        dest="delta_info",
+        help="Show delta compression info",
+    )
+    p_inspect.add_argument(
+        "--runtime-hints",
+        action="store_true",
+        dest="runtime_hints",
+        help="Show runtime integration hints",
+    )
     p_inspect.set_defaults(func=cmd_inspect)
 
     # bench
@@ -1472,6 +1551,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--partial-tensor",
         default=None,
         help="With --partial-access: read a specific tensor by name",
+    )
+    p_bench.add_argument(
+        "--dedup", action="store_true", help="Benchmark with deduplication enabled"
     )
     p_bench.set_defaults(func=cmd_bench)
 

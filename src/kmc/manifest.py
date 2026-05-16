@@ -30,6 +30,13 @@ Format version history:
           tensor indexes.
         - BlockEntry gains archive_offset field for direct block access.
         - Backward-compatible: v1/v2/v3/v4/v5 manifests read without errors in v6 readers.
+    - v7 (KMC v0.8): Adds deduplication and delta compression metadata.
+        - KMCManifest gains deduplication, delta, and runtime_hints fields.
+        - BlockEntry gains dedup_ref field for referencing canonical blocks.
+        - deduplication: Dict with fingerprint method, unique/dedup counts, saved bytes.
+        - delta: Dict with base archive info and mode (experimental).
+        - runtime_hints: Dict with partial access capabilities.
+        - Backward-compatible: v1/v2/v3/v4/v5/v6 manifests read without errors in v7 readers.
 """
 
 from __future__ import annotations
@@ -37,7 +44,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-KMC_MANIFEST_VERSION = 6  # v0.7-alpha with index metadata for partial access
+KMC_MANIFEST_VERSION = 7  # v0.8-alpha with deduplication, delta, runtime_hints
 
 
 @dataclass
@@ -65,6 +72,8 @@ class BlockEntry:
     tensor_shape: list[int] = field(default_factory=list)
     # v0.7 field (optional, for partial access)
     archive_offset: int = 0  # Physical byte offset in the .kmc file (0 = not set)
+    # v0.8 field (optional, for deduplication)
+    dedup_ref: int = -1  # Global block ID of the canonical block (-1 = not a duplicate)
 
 
 @dataclass
@@ -117,7 +126,7 @@ class KMCManifest:
 
     version: int = KMC_MANIFEST_VERSION
     tool: str = "kimari-microcompress"
-    tool_version: str = "0.7.0-alpha"
+    tool_version: str = "0.8.0-alpha"
     created_at: str = ""
     total_original_size: int = 0
     total_compressed_size: int = 0
@@ -130,6 +139,10 @@ class KMCManifest:
     parallelism: dict = field(default_factory=dict)  # v0.6: parallelism metadata
     # v0.7 fields (optional, for partial access index)
     index: dict = field(default_factory=dict)  # v0.7: index metadata for partial access
+    # v0.8 fields (optional, for deduplication, delta, runtime hints)
+    deduplication: dict = field(default_factory=dict)  # v0.8: dedup stats and fingerprint
+    delta: dict = field(default_factory=dict)  # v0.8: delta archive metadata
+    runtime_hints: dict = field(default_factory=dict)  # v0.8: runtime integration hints
 
     def to_json(self) -> str:
         """Serialize manifest to JSON string."""
@@ -160,6 +173,7 @@ class KMCManifest:
                         tensor_dtype=b.get("tensor_dtype", ""),
                         tensor_shape=b.get("tensor_shape", []),
                         archive_offset=b.get("archive_offset", 0),
+                        dedup_ref=b.get("dedup_ref", -1),
                     )
                 )
             tensor_entries = [TensorEntry(**t) for t in f.get("tensor_entries", [])]
@@ -188,6 +202,9 @@ class KMCManifest:
             format_metadata=data.get("format_metadata", {}),
             parallelism=data.get("parallelism", {}),
             index=data.get("index", {}),
+            deduplication=data.get("deduplication", {}),
+            delta=data.get("delta", {}),
+            runtime_hints=data.get("runtime_hints", {}),
         )
 
     def to_bytes(self) -> bytes:
