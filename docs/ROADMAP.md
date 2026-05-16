@@ -6,17 +6,18 @@ This document tracks the development progress and future plans for Kimari MicroC
 
 These are **real, documented limitations** of the current KMC implementation. They are not bugs — they are scope boundaries:
 
-1. **KMC does NOT reduce VRAM during inference.** Compressed archives must be fully unpacked before a model can be loaded. Block-loading is future research.
+1. **KMC does NOT perform compressed inference.** Partial access decompresses requested data before returning it. Tensors are fully decompressed in memory. Runtime compressed loading (keeping blocks compressed in memory) is future research.
 2. **KMC does NOT modify model weights.** Compression is strictly lossless. No quality degradation occurs at any point.
-3. **Block-loading is not implemented.** The manifest contains per-block offsets, but on-demand decompression of individual blocks is a future feature.
-4. **GGUF-aware compression is experimental.** The `--gguf-aware` flag adjusts codec selection for quantized tensors, but does not yet implement block-level GGUF-specific compression strategies.
-5. **No fixed compression ratios.** Results depend heavily on model format, data type, and content. Synthetic benchmarks produce misleadingly high ratios.
-6. **KMC is not quantization.** Use quantization (GGUF Q4_K, GPTQ, AWQ) for smaller inference models. KMC is complementary: it compresses files for storage and transfer.
-7. **No pickle deserialization.** KMC never loads pickle-based files (optimizer.pt, training_args.bin, pytorch_model.bin). These are compressed as raw bytes with size/hash recorded.
-8. **LoRA delta compression is not yet implemented.** LoRA adapters are compressed using standard or tensor-aware mode. Delta compression relative to a base model is future work.
-9. **KMC is lossless only.** There is no lossy mode and no weight modification of any kind.
-10. **No streaming I/O.** The entire archive must be loaded into memory for operations. Streaming pack/unpack for minimal memory footprint is planned for v0.6.
-11. **No parallel compression.** Blocks are compressed sequentially. Parallel block compression is planned for v0.6.
+3. **Partial tensor loading returns bytes.** The `read_tensor` method and `--tensor` flag return raw bytes. To convert to native tensor objects (PyTorch, NumPy), the experimental safetensors loader is required and depends on optional tensor libraries being installed.
+4. **Tensor extraction depends on tensor metadata.** Archives must be created with `--tensor-aware` mode for tensor-level partial access. Older archives support file-level partial access but not tensor-level access.
+5. **GGUF-aware compression is experimental.** The `--gguf-aware` flag adjusts codec selection for quantized tensors, but does not yet implement block-level GGUF-specific compression strategies.
+6. **No fixed compression ratios.** Results depend heavily on model format, data type, and content. Synthetic benchmarks produce misleadingly high ratios.
+7. **KMC is not quantization.** Use quantization (GGUF Q4_K, GPTQ, AWQ) for smaller inference models. KMC is complementary: it compresses files for storage and transfer.
+8. **No pickle deserialization.** KMC never loads pickle-based files (optimizer.pt, training_args.bin, pytorch_model.bin). These are compressed as raw bytes with size/hash recorded.
+9. **LoRA delta compression is not yet implemented.** LoRA adapters are compressed using standard or tensor-aware mode. Delta compression relative to a base model is future work.
+10. **KMC is lossless only.** There is no lossy mode and no weight modification of any kind.
+11. **No concurrent partial reads.** The `KMCReader` class is not thread-safe for concurrent reads. Create separate instances per thread.
+12. **Safetensors loader is experimental.** The `load_tensor()` function may change without notice between versions.
 
 ---
 
@@ -115,38 +116,119 @@ Full GGUF tensor metadata parsing, specialized workflows, experimental GGUF-awar
 
 ---
 
-## v0.6 — Kimari CLI + Streaming + Parallel (Next)
+## v0.6 — Kimari CLI + Streaming + Parallel ✅ Completed
 
-Full integration with the Kimari ecosystem and performance improvements. This version focuses on production readiness: performance, reliability, and seamless integration.
+Full integration with the Kimari ecosystem and performance improvements. This version focused on production readiness: performance, reliability, and seamless integration.
 
 ### Kimari CLI Integration
 
-- [ ] `kimari compress` command in Kimari CLI
-- [ ] `kimari decompress` command
-- [ ] `kimari verify-compress` command
-- [ ] `kimari bench-compress` command
-- [ ] `kimari compress-lora` command
-- [ ] `kimari compress-checkpoint` command
-- [ ] Shared configuration (block size, compression level)
-- [ ] Progress reporting integration with Kimari UI
-- [ ] KimariDB storage backend integration
-- [ ] Content-addressed archive storage
+- [x] `kimari compress` command in Kimari CLI
+- [x] `kimari decompress` command
+- [x] `kimari verify-compress` command
+- [x] `kimari bench-compress` command
+- [x] Shared configuration (block size, compression level)
+- [x] Plugin registration interface
 
 ### Streaming I/O
 
-- [ ] Streaming pack: process files without loading entire archive into memory
-- [ ] Streaming unpack: write blocks incrementally without full archive buffering
-- [ ] Memory-mapped manifest reading for large archives
-- [ ] Progress callbacks for long-running operations
-- [ ] Estimated time remaining based on throughput
+- [x] Streaming pack: process files without loading entire archive into memory
+- [x] Streaming unpack: write blocks incrementally without full archive buffering
+- [x] Progress callbacks for long-running operations
 
 ### Parallel Compression
 
-- [ ] Parallel block compression using `concurrent.futures` or `multiprocessing`
-- [ ] Configurable worker count (default: number of CPU cores)
-- [ ] Thread-safe codec operations (ensure all codecs are reentrant)
-- [ ] Parallel block decompression for faster unpack
-- [ ] Benchmark parallel vs sequential performance
+- [x] Parallel block compression using `concurrent.futures`
+- [x] Configurable worker count (`--jobs N`, default: 1, auto: CPU count)
+- [x] Thread-safe codec operations
+- [x] Parallel block decompression for faster unpack
+- [x] Benchmark parallel vs sequential performance
+
+### Reliability
+
+- [x] Quick verification mode (`kmc verify --quick`)
+- [x] Benchmark job comparison (`kmc bench --compare-jobs 1,2,4,auto`)
+- [x] Manifest v5 with `parallelism` field
+
+---
+
+## v0.7 — Partial Access + Selective Extraction ✅ Completed
+
+Block-level loading and selective extraction. This version enables reading specific files and tensors from archives without full decompression.
+
+### Block/File/Tensor Indexes
+
+- [x] `BlockIndex` mapping block IDs to physical archive locations
+- [x] `FileIndex` mapping file paths to metadata and block lists
+- [x] `TensorIndex` mapping tensor names to metadata and block lists
+- [x] Automatic offset reconstruction for older archives (pre-v0.7)
+- [x] Pattern matching for file-level selective access
+
+### KMCReader Python API
+
+- [x] `KMCReader` class with context manager support
+- [x] `list_files()` and `list_tensors()` for content discovery
+- [x] `read_file()` for partial file reading
+- [x] `read_file_range()` for byte-range reads
+- [x] `read_tensor()` for partial tensor reading (returns raw bytes)
+- [x] `extract_file()` and `extract_tensor()` for disk extraction
+- [x] Block checksum verification on every read
+- [x] File hash verification after reconstruction
+
+### Selective Extraction CLI
+
+- [x] `kmc unpack --only PATTERN` for file-level selective extraction
+- [x] `kmc unpack --tensor NAME` for tensor-level selective extraction
+- [x] `kmc unpack --list` to list available files/tensors
+- [x] `kmc list` command for archive content listing
+- [x] `--json` output for all list/extraction commands
+
+### Experimental Safetensors Loader
+
+- [x] `load_tensor_bytes()` for raw byte loading (no dependencies)
+- [x] `load_tensor()` for native tensor objects (requires PyTorch or NumPy)
+- [x] Dtype mapping: safetensors format to PyTorch/NumPy dtypes
+- [x] BF16 support via PyTorch (NumPy lacks bfloat16)
+
+### Manifest v6
+
+- [x] `index` field with `has_block_offsets`, `has_file_index`, `has_tensor_index`
+- [x] `archive_offset` field on `BlockEntry` for direct block access
+- [x] Backward compatible with v1 through v5 manifests
+
+### Benchmarks and Inspection
+
+- [x] `kmc bench --partial-access` for partial access performance benchmarking
+- [x] `kmc inspect` shows partial access info (block/file/tensor index status)
+
+> **Important:** Block-level loading does NOT reduce inference VRAM. The decompressed blocks still occupy the same memory. Runtime compressed loading (keeping blocks compressed in memory) is future research.
+
+## v0.8 — Runtime Integration + Performance (Next)
+
+Integrating partial access with ML frameworks and improving performance for production workloads. This version focuses on making partial access practical for real-world model loading scenarios.
+
+### Runtime Integration
+
+- [ ] Integration with Hugging Face `from_pretrained()` loading
+- [ ] Integration with llama.cpp GGUF loading
+- [ ] Block server for remote block fetching (HTTP/gRPC)
+- [ ] Lazy tensor loading (only decompress when first accessed)
+- [ ] Tensor caching (keep recently used tensors decompressed)
+- [ ] Prefetching (anticipate which tensors will be needed next)
+
+### Performance
+
+- [ ] Block-level `read_file_range()` optimization (read only overlapping blocks)
+- [ ] Memory-mapped archive reading for large files
+- [ ] Concurrent partial reads (thread-safe KMCReader)
+- [ ] Decompressed block cache for repeated reads
+- [ ] Benchmarks for partial access vs full-archive loading
+
+### Loader Improvements
+
+- [ ] Stable API for safetensors loader (graduate from experimental)
+- [ ] GGUF tensor loading support
+- [ ] Direct-to-GPU tensor loading (CUDA pinned memory)
+- [ ] Streaming tensor iteration for large models
 
 ### Reliability
 
@@ -154,38 +236,8 @@ Full integration with the Kimari ecosystem and performance improvements. This ve
 - [ ] Resume interrupted unpack operations
 - [ ] Archive corruption detection and partial recovery
 - [ ] Comprehensive error messages with actionable suggestions
-- [ ] Logging framework integration (structured logging)
 
-## v0.7 — Experimental Loader/Runtime Work
-
-Block-level loading and runtime integration. This is the most ambitious milestone, enabling KMC to serve as a model loading backend rather than just a storage format.
-
-### Block-Level Loading
-
-- [ ] Block-level loading (partial decompression on demand)
-- [ ] `BlockServer` class for programmatic block access
-- [ ] Load specific tensors by name without decompressing the entire archive
-- [ ] Load tensor ranges (e.g., first N layers)
-- [ ] Memory-mapped archive reading for large files
-
-### Runtime Integration
-
-- [ ] Python API for programmatic block access
-- [ ] Integration with Hugging Face `from_pretrained()` loading
-- [ ] Integration with llama.cpp GGUF loading
-- [ ] Block server for remote block fetching (HTTP/gRPC)
-- [ ] Runtime compressed loading (research phase — keeping blocks compressed in memory)
-
-### Performance
-
-- [ ] Lazy tensor loading (only decompress when first accessed)
-- [ ] Tensor caching (keep recently used tensors decompressed)
-- [ ] Prefetching (anticipate which tensors will be needed next)
-- [ ] Benchmarks for block-level vs full-archive loading
-
-> **Important:** Block-level loading does NOT reduce inference VRAM. The decompressed tensors still occupy the same GPU memory. Runtime compressed loading (keeping blocks compressed in CPU RAM) is future research.
-
-## v0.8 — Advanced Compression
+## v0.9 — Advanced Compression
 
 More sophisticated compression strategies for specific use cases:
 
@@ -194,7 +246,7 @@ More sophisticated compression strategies for specific use cases:
 - [ ] Delta compression for LoRA adapters relative to base models
 - [ ] Delta compression between training checkpoints
 - [ ] XOR delta encoding for adjacent weight matrix rows
-- [ ] Delta manifest schema (v5 format)
+- [ ] Delta manifest schema (v7 format)
 
 ### GGUF-Specific
 
@@ -215,7 +267,7 @@ More sophisticated compression strategies for specific use cases:
 - [ ] Dictionary-trained zstd for similar tensor blocks
 - [ ] Cross-model compression (shared vocabulary, shared embeddings)
 
-## v0.9 — Encryption and Authentication
+## v1.0 — Encryption and Authentication
 
 Security features for production deployments:
 
@@ -226,7 +278,7 @@ Security features for production deployments:
 - [ ] Key management integration (environment variables, key files, key servers)
 - [ ] Encrypted manifest with selective disclosure
 
-## v1.0 — Production Release
+## v1.1 — Production Release
 
 The first stable release with all major features and documented behavior:
 

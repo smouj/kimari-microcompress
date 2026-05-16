@@ -644,6 +644,15 @@ def pack(
             "deterministic_order": True,
         }
 
+    # Record index metadata (v0.7+)
+    has_tensor_data = any(b.tensor_name for f in manifest.files for b in f.blocks)
+    manifest.index = {
+        "version": 1,
+        "has_block_offsets": True,
+        "has_file_index": True,
+        "has_tensor_index": has_tensor_data,
+    }
+
     # Compute correct offsets iteratively
     for _ in range(20):
         manifest_bytes = manifest.to_bytes()
@@ -652,6 +661,7 @@ def pack(
         current_offset = data_offset
         for _file_idx, _block_idx, block_entry, _block_data in all_blocks:
             block_entry.offset = current_offset
+            block_entry.archive_offset = current_offset  # v0.7: physical offset
             current_offset += block_entry.compressed_size
 
         new_manifest_bytes = manifest.to_bytes()
@@ -816,7 +826,7 @@ def verify_quick(archive: Path) -> VerificationReport:
     report.compressed_size = manifest.total_compressed_size
     report.restored_size = manifest.total_original_size
 
-    if manifest.version not in (1, 2, 3, 4, 5):
+    if manifest.version not in (1, 2, 3, 4, 5, 6):
         report.warnings.append(f"Unknown manifest version: v{manifest.version}")
 
     structural_errors = validate_manifest(manifest)
@@ -880,7 +890,7 @@ def verify_full(archive: Path) -> VerificationReport:
     report.compressed_size = manifest.total_compressed_size
     report.restored_size = manifest.total_original_size
 
-    if manifest.version not in (1, 2, 3, 4, 5):
+    if manifest.version not in (1, 2, 3, 4, 5, 6):
         report.warnings.append(f"Unknown manifest version: v{manifest.version}")
 
     structural_errors = validate_manifest(manifest)

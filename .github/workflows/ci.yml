@@ -52,5 +52,8 @@ jobs:
           python -m kmc pack --help
           python -m kmc pack-lora --help
           python -m kmc pack-checkpoint --help
+          python -m kmc unpack --help
+          python -m kmc verify --help
           python -m kmc inspect --help
           python -m kmc bench --help
+          python -m kmc list --help

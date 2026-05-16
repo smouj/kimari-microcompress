@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kimari-microcompress"
-version = "0.6.0-alpha"
-description = "Reversible lossless compression for AI models: streaming I/O, parallel compression, safetensors, GGUF, LoRA, checkpoints, tensor-aware codecs."
+version = "0.7.0-alpha"
+description = "Reversible lossless compression for AI models: partial access, selective extraction, block/file/tensor indexes, streaming I/O, parallel compression, safetensors, GGUF, LoRA, checkpoints."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "KimariDB", email = "dev@kimari.dev"},
 ]
-keywords = ["compression", "ai-models", "safetensors", "gguf", "lossless", "zstd", "checksum", "byteplane", "floatplane", "lora", "checkpoint", "ggml"]
+keywords = ["compression", "ai-models", "safetensors", "gguf", "lossless", "zstd", "checksum", "byteplane", "floatplane", "lora", "checkpoint", "ggml", "partial-access", "selective-extraction", "tensor-index"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

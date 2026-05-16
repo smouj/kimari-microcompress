@@ -1,6 +1,6 @@
 # KMC Format Specification
 
-**Version:** 4
+**Version:** 6
 **Status:** Experimental
 
 ## Overview
@@ -45,6 +45,69 @@ The magic number encodes both the format identifier and the format version:
 ## Manifest
 
 The manifest is a JSON document encoded in UTF-8. It describes all files, blocks, compression parameters, and artifact metadata.
+
+### Manifest Schema (v6)
+
+```json
+{
+  "version": 6,
+  "tool": "kimari-microcompress",
+  "tool_version": "0.7.0-alpha",
+  "created_at": "2025-01-01T00:00:00+00:00",
+  "total_original_size": 0,
+  "total_compressed_size": 0,
+  "artifact_type": "huggingface_model",
+  "artifact_metadata": {},
+  "format_metadata": {},
+  "parallelism": {},
+  "index": {
+    "version": 1,
+    "has_block_offsets": true,
+    "has_file_index": true,
+    "has_tensor_index": true
+  },
+  "files": [
+    {
+      "path": "model.safetensors",
+      "original_size": 1048576,
+      "hash": "sha256:abcdef...",
+      "block_size": 262144,
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 1234,
+          "compressed_size": 200000,
+          "original_size": 262144,
+          "codec": "floatplane",
+          "hash": "sha256:123456...",
+          "codec_metadata": {
+            "transform": "floatplane",
+            "dtype": "BF16",
+            "inner_codec": "zstd",
+            "planes": ["sign", "exponent", "mantissa"],
+            "n_elements": 131072
+          },
+          "tensor_name": "transformer.h.0.attn.c_attn.weight",
+          "tensor_dtype": "BF16",
+          "tensor_shape": [768, 2304],
+          "archive_offset": 5678
+        }
+      ],
+      "tensor_count": 1,
+      "dtype_summary": ["BF16"],
+      "tensor_entries": [
+        {
+          "name": "transformer.h.0.attn.c_attn.weight",
+          "dtype": "BF16",
+          "shape": [768, 2304],
+          "byte_offset": 0,
+          "byte_size": 3538944
+        }
+      ]
+    }
+  ]
+}
+```
 
 ### Manifest Schema (v4)
 
@@ -140,7 +203,7 @@ For reference, the original v1 manifest schema is shown below. V4 readers should
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `version` | integer | Format version (currently 4) |
+| `version` | integer | Format version (currently 6) |
 | `tool` | string | Tool name that created the archive |
 | `tool_version` | string | Version of the tool |
 | `created_at` | string | ISO 8601 timestamp of archive creation |
@@ -149,6 +212,8 @@ For reference, the original v1 manifest schema is shown below. V4 readers should
 | `artifact_type` | string | Artifact classification (v4, optional). One of: `"huggingface_model"`, `"gguf_model"`, `"lora_adapter"`, `"training_checkpoint"`, `"unknown"` |
 | `artifact_metadata` | object | Artifact-specific metadata (v4, optional). See artifact metadata schemas below. |
 | `format_metadata` | object | Format-specific metadata (v4, optional). See format metadata schemas below. |
+| `parallelism` | object | Parallelism metadata (v5, optional). Contains `created_with_jobs` and `deterministic_order`. |
+| `index` | object | Partial access index metadata (v6, optional). See index metadata schema below. |
 | `files` | array | List of file entries |
 
 #### File Entry
@@ -175,6 +240,22 @@ For reference, the original v1 manifest schema is shown below. V4 readers should
 | `tensor_name` | string | Name of the tensor this block belongs to (v3+, optional) |
 | `tensor_dtype` | string | Dtype of the tensor, e.g. `"BF16"`, `"FP16"`, `"FP32"` (v3+, optional) |
 | `tensor_shape` | array | Shape of the tensor as list of integers (v3+, optional) |
+| `archive_offset` | integer | Physical byte offset of this block in the `.kmc` file (v6+, optional, 0 = not set) |
+
+### Index Metadata Schema (v6)
+
+The `index` field at the top level records the availability of partial access features. This field is added by KMC v0.7+ during packing and enables readers to quickly determine which partial access capabilities are available without scanning the entire manifest.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | integer | Index metadata version (currently 1) |
+| `has_block_offsets` | boolean | Whether block entries have `archive_offset` values stored directly |
+| `has_file_index` | boolean | Whether file-level index data is available |
+| `has_tensor_index` | boolean | Whether tensor-level index data is available (requires `--tensor-aware` packing) |
+
+When `has_block_offsets` is `true`, blocks can be accessed directly by seeking to their `archive_offset` without offset reconstruction. When `false` (older archives), the reader reconstructs offsets by computing cumulative block positions from the archive header.
+
+When `has_tensor_index` is `false`, tensor-level partial access (`read_tensor`, `--tensor`) is unavailable for this archive, but file-level partial access (`read_file`, `--only`) still works.
 
 ### Artifact Metadata Schemas (v4)
 
@@ -325,6 +406,8 @@ The format version is encoded in the magic number (bytes 4-5) and repeated in th
 - **v2** (KMC v0.3): Adds optional tensor-aware entries (TensorEntry) for safetensors files.
 - **v3** (KMC v0.4): Adds per-block `codec_metadata`, `tensor_name`, `tensor_dtype`, `tensor_shape` fields for tensor-aware codecs.
 - **v4** (KMC v0.5): Adds `artifact_type`, `artifact_metadata`, `format_metadata` fields for artifact-aware workflows.
+- **v5** (KMC v0.6): Adds `parallelism` field for tracking worker count and deterministic order guarantee.
+- **v6** (KMC v0.7): Adds `index` field for partial access metadata and `archive_offset` field on block entries for direct block access.
 
 Future versions may add:
 - New codecs.
@@ -335,12 +418,15 @@ Future versions may add:
 ### Backward Compatibility
 
 - **v4 readers** can read v1, v2, and v3 manifests. Missing `artifact_type`, `artifact_metadata`, and `format_metadata` fields default to `"unknown"`, `{}`, and `{}` respectively.
+- **v5 readers** can read v1 through v4 manifests. Missing `parallelism` field defaults to `{}`.
+- **v6 readers** can read v1 through v5 manifests. Missing `index` field defaults to `{}`. Missing `archive_offset` on block entries defaults to `0`; the reader reconstructs offsets from the archive layout when needed.
 - **v3 readers** can read v1 and v2 manifests. Missing `codec_metadata`, `tensor_name`, `tensor_dtype`, and `tensor_shape` fields default to empty/zero values.
 - **v2 readers** can read v1 manifests. Missing tensor entries default to empty.
 - **v1 readers** should not encounter v2/v3/v4 manifests in normal operation, but they can safely ignore unknown fields in JSON.
 - **v2/v3/v4 readers encountering v1 manifests** will not have codec metadata available. They should use the legacy `compress_block`/`decompress_block` API for v1 blocks.
 - **`byteplane` and `floatplane` codecs require v3+ manifests** because their decompression requires `codec_metadata` (transform type, element_size, inner_codec). The legacy `decompress_block` function raises a `ValueError` for these codecs, directing users to the new archive API.
 - **v4 `artifact_type` and `format_metadata` fields are ignored by v1/v2/v3 readers** because they are additional top-level fields that do not affect block decompression.
+- **v6 `index` and `archive_offset` fields are ignored by v1/v2/v3/v4/v5 readers** because they are additive fields that do not affect block decompression or full unpack operations. Older readers simply do not use the partial access features.
 
 Readers should check the magic number version and the manifest version for compatibility.
 

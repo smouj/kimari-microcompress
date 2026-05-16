@@ -11,9 +11,9 @@ from kmc.manifest import (
 class TestManifestV4:
     """Tests for manifest v4 (v0.5) features."""
 
-    def test_manifest_version_is_5(self):
-        """KMC_MANIFEST_VERSION is 5 for v0.6."""
-        assert KMC_MANIFEST_VERSION == 5
+    def test_manifest_version_is_6(self):
+        """KMC_MANIFEST_VERSION is 6 for v0.7."""
+        assert KMC_MANIFEST_VERSION == 6
 
     def test_default_artifact_type(self):
         """Default artifact_type is 'unknown'."""
@@ -30,10 +30,10 @@ class TestManifestV4:
         m = KMCManifest()
         assert m.format_metadata == {}
 
-    def test_tool_version_is_0_6(self):
-        """Tool version is 0.6.0-alpha."""
+    def test_tool_version_is_0_7(self):
+        """Tool version is 0.7.0-alpha."""
         m = KMCManifest()
-        assert m.tool_version == "0.6.0-alpha"
+        assert m.tool_version == "0.7.0-alpha"
 
     def test_set_artifact_type(self):
         """artifact_type can be set."""

@@ -25,6 +25,11 @@ Format version history:
         - KMCManifest gains parallelism field recording worker count and deterministic
           order guarantee.
         - Backward-compatible: v1/v2/v3/v4 manifests read without errors in v5 readers.
+    - v6 (KMC v0.7): Adds index metadata for partial access.
+        - KMCManifest gains index field recording availability of block, file, and
+          tensor indexes.
+        - BlockEntry gains archive_offset field for direct block access.
+        - Backward-compatible: v1/v2/v3/v4/v5 manifests read without errors in v6 readers.
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-KMC_MANIFEST_VERSION = 5  # v0.6-alpha with parallelism and streaming metadata
+KMC_MANIFEST_VERSION = 6  # v0.7-alpha with index metadata for partial access
 
 
 @dataclass
@@ -58,6 +63,8 @@ class BlockEntry:
     tensor_name: str = ""
     tensor_dtype: str = ""
     tensor_shape: list[int] = field(default_factory=list)
+    # v0.7 field (optional, for partial access)
+    archive_offset: int = 0  # Physical byte offset in the .kmc file (0 = not set)
 
 
 @dataclass
@@ -110,7 +117,7 @@ class KMCManifest:
 
     version: int = KMC_MANIFEST_VERSION
     tool: str = "kimari-microcompress"
-    tool_version: str = "0.6.0-alpha"
+    tool_version: str = "0.7.0-alpha"
     created_at: str = ""
     total_original_size: int = 0
     total_compressed_size: int = 0
@@ -121,6 +128,8 @@ class KMCManifest:
     format_metadata: dict = field(default_factory=dict)
     # v0.6 fields (optional, for parallelism tracking)
     parallelism: dict = field(default_factory=dict)  # v0.6: parallelism metadata
+    # v0.7 fields (optional, for partial access index)
+    index: dict = field(default_factory=dict)  # v0.7: index metadata for partial access
 
     def to_json(self) -> str:
         """Serialize manifest to JSON string."""
@@ -150,6 +159,7 @@ class KMCManifest:
                         tensor_name=b.get("tensor_name", ""),
                         tensor_dtype=b.get("tensor_dtype", ""),
                         tensor_shape=b.get("tensor_shape", []),
+                        archive_offset=b.get("archive_offset", 0),
                     )
                 )
             tensor_entries = [TensorEntry(**t) for t in f.get("tensor_entries", [])]
@@ -177,6 +187,7 @@ class KMCManifest:
             artifact_metadata=data.get("artifact_metadata", {}),
             format_metadata=data.get("format_metadata", {}),
             parallelism=data.get("parallelism", {}),
+            index=data.get("index", {}),
         )
 
     def to_bytes(self) -> bytes:

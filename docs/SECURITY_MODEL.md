@@ -77,6 +77,34 @@ These files are still compressed and included in the archive. On unpack, they ar
 
 **Mitigation**: Manifest validation checks for duplicate file paths during both pack and unpack. If duplicate paths are detected, the operation is rejected. This ensures that each path in the archive is unique and deterministic.
 
+### 8. Selective Extraction Path Abuse (v0.7+)
+
+**Threat**: The `--only` flag in `kmc unpack` accepts a pattern string that could be used to trick the extraction into writing files outside the output directory. For example, an attacker might craft a manifest with file paths that, when matched and extracted, resolve to locations outside the intended output directory.
+
+**Mitigation**: The selective extraction code uses the same `safe_join_extract_path()` function as full unpacking. Every file extracted via `--only` or `--tensor` is validated to ensure the resolved path stays within the output directory. Additionally, the `--only` pattern itself is treated as a matching expression, not a filesystem path. Patterns containing path traversal sequences (`..`) or absolute paths are rejected.
+
+**Test coverage**: `tests/test_v07_features.py` includes tests for `--only` with `../evil` patterns and absolute path patterns like `/etc/passwd`, confirming that these are rejected.
+
+### 9. Block Checksum Bypass via Partial Access (v0.7+)
+
+**Threat**: A malicious archive contains blocks with incorrect data but valid-looking manifest hashes. If partial access skips checksum verification, corrupted or tampered data could be returned to the caller without detection.
+
+**Mitigation**: The `KMCReader` class verifies block checksums on every read operation. Each block's compressed data is hashed with SHA-256 and compared against the manifest value before decompression. For file-level reads, the reconstructed file hash is also verified after concatenation. This ensures that partial access maintains the same integrity guarantees as full unpack operations. There is no "skip verification" option in the public API.
+
+**Test coverage**: `tests/test_v07_features.py` includes tests that corrupt block data in an archive and verify that `KMCReader.read_file()` raises a `ValueError` with a checksum mismatch message.
+
+### 10. Tensor Name Injection (v0.7+)
+
+**Threat**: Tensor names in the manifest contain special characters (path separators, null bytes) that could be used for path traversal when extracting tensors to disk via `extract_tensor()`.
+
+**Mitigation**: The `extract_tensor()` method sanitizes tensor names before writing to disk. Forward slashes, backslashes, and colons are replaced with underscores. The output path is constructed by joining the output directory with the sanitized filename and a `.bin` extension. The resulting path is always within the output directory.
+
+### 11. Archive Offset Spoofing (v0.7+)
+
+**Threat**: A malicious manifest contains `archive_offset` values that point to incorrect locations in the archive, causing the reader to read data from unintended offsets. This could potentially be used to read arbitrary data from the file if the offset points outside the archive.
+
+**Mitigation**: Block checksum verification prevents this attack. Even if the offset points to the wrong data, the SHA-256 hash of the read data will not match the manifest's block hash, and the read will fail with a checksum mismatch error. An attacker would need to simultaneously modify both the offset and the hash to bypass this check, which would require finding a SHA-256 collision.
+
 ## Security Architecture
 
 ### Defense in Depth
@@ -90,24 +118,29 @@ KMC applies security checks at multiple layers:
 │  - Duplicate path detection             │
 │  - Codec validation                     │
 │  - Size consistency checks              │
+│  - Index metadata validation (v0.7+)    │
 ├─────────────────────────────────────────┤
 │  Layer 2: Path Sanitization             │
 │  - No absolute paths                    │
 │  - No traversal (..) components         │
 │  - No null bytes or control chars       │
 │  - Symlink overwrite protection         │
+│  - Tensor name sanitization (v0.7+)     │
+│  - Selective extraction path checks     │
 ├─────────────────────────────────────────┤
 │  Layer 3: Integrity Verification        │
 │  - SHA-256 per-block hash               │
 │  - SHA-256 per-file hash                │
 │  - Block size consistency               │
 │  - Total size validation                │
+│  - Partial read checksum checks (v0.7+) │
 ├─────────────────────────────────────────┤
 │  Layer 4: Data Safety                   │
 │  - No pickle deserialization            │
 │  - No model weight loading              │
 │  - No code execution from archives      │
 │  - Lossless-only operations             │
+│  - Block offset validation (v0.7+)      │
 └─────────────────────────────────────────┘
 ```
 
@@ -189,6 +222,10 @@ KMC has not undergone a formal security audit. The security mitigations describe
 | Pickle deserialization | ✅ Implemented | Never deserializes pickle files |
 | Block hash verification | ✅ Implemented | SHA-256 per-block |
 | File hash verification | ✅ Implemented | SHA-256 per-file |
+| Partial read checksum verification | ✅ Implemented | Block + file hash on every partial read (v0.7+) |
+| Selective extraction path protection | ✅ Implemented | Same safe_join as full unpack (v0.7+) |
+| Tensor name sanitization | ✅ Implemented | Special chars replaced in extract_tensor (v0.7+) |
+| Archive offset validation | ✅ Implemented | Checksum prevents spoofed offsets (v0.7+) |
 | Archive signing | 🔲 Planned | Future release |
 | Sandboxed unpack | 🔲 Planned | Future release |
 | Streaming verification | 🔲 Planned | Future release |

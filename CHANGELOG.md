@@ -5,6 +5,35 @@ All notable changes to Kimari MicroCompress are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0-alpha] — 2026-05-18
+
+### Added
+
+- **Partial access indexes** (`src/kmc/index/`) — BlockIndex, FileIndex, and TensorIndex classes that map between archive blocks, files, and tensors, enabling selective extraction without decompressing the entire archive. BlockIndex reconstructs offsets from older manifests (pre-v0.7) automatically when `archive_offset` is not set.
+- **KMCReader Python API** (`src/kmc/reader.py`) — Read-only partial-access interface for `.kmc` archives. Supports context manager usage, file listing, tensor listing, reading individual files (`read_file()`), reading byte ranges (`read_file_range()`), reading individual tensors (`read_tensor()`), and extracting to disk (`extract_file()`, `extract_tensor()`). All reads verify block checksums and file hashes.
+- **Selective extraction CLI** — `kmc unpack --only PATTERN` for file-level selective extraction with fnmatch glob support; `kmc unpack --tensor NAME` for tensor-level selective extraction; `kmc unpack --list` to list available files and tensors without extracting. All selective extraction commands support `--json` output.
+- **`kmc list` command** — Dedicated command for listing archive contents with `--files`, `--tensors`, and `--json` flags. Shows file sizes, tensor dtypes, and tensor shapes in human-readable or structured JSON format.
+- **Experimental safetensors tensor loader** (`src/kmc/loaders/`) — `load_tensor_bytes()` returns raw tensor bytes without optional dependencies; `load_tensor()` returns native tensor objects (PyTorch or NumPy) with automatic dtype mapping. BF16 tensors require PyTorch since NumPy does not natively support bfloat16.
+- **Manifest v6** — New `index` field at the top level recording `has_block_offsets`, `has_file_index`, and `has_tensor_index`. New `archive_offset` field on `BlockEntry` for direct block access without offset reconstruction. Backward compatible with v1 through v5 manifests (missing fields default to empty/zero).
+- **Partial-access benchmarks** — `kmc bench --partial-access` flag for measuring archive open time, single-file read time, and tensor read time. Supports `--only` and `--tensor` flags for targeted benchmarks. JSON output available.
+- **Improved `kmc inspect`** — Shows partial access info for `.kmc` archives: block index status (native or reconstructed), file index availability, tensor index availability, selective extraction support, and tensor extraction support.
+- **Security tests for partial access** — Tests for path traversal in `--only`, absolute path rejection, block checksum verification on corrupt archives, truncated archive handling, tensor name safety, and safe path joining in `extract_file()`.
+- **53 new tests** for indexes, KMCReader, selective extraction, kmc list, manifest v6, partial access security, and CLI flags.
+
+### Changed
+
+- **Version bumped** to 0.7.0-alpha in pyproject.toml, __init__.py, and manifest.py
+- **`src/kmc/manifest.py`** — Added `index` field to KMCManifest. Added `archive_offset` field to BlockEntry. Manifest version bumped to 6. Backward compatible.
+- **`src/kmc/cli.py`** — Added `--only`, `--tensor`, `--list` flags to unpack command. Added `kmc list` command with `--files`, `--tensors`, `--json` flags. Added `--partial-access` flag to bench command. Added partial access info display in inspect command.
+- **`src/kmc/archive.py`** — Pack function now sets `archive_offset` on block entries and `index` metadata in the manifest.
+
+### Warnings
+
+- **KMC does NOT perform compressed inference.** Partial access decompresses requested data before returning it.
+- **Partial tensor loading returns bytes.** The `read_tensor` method returns raw bytes. To convert to native tensor objects, use the experimental safetensors loader.
+- **Tensor extraction depends on tensor metadata.** Archives must be created with `--tensor-aware` mode for tensor-level partial access.
+- **Older archives may support file-level partial access but not tensor-level access.** The index module reconstructs block offsets from older manifests, but tensor indexes require tensor metadata from `--tensor-aware` mode.
+
 ## [0.6.0-alpha] — 2026-05-17
 
 ### Added

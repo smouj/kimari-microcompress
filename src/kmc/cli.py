@@ -15,6 +15,7 @@ from .benchmark import (
     run_benchmark,
 )
 from .inspector import inspect_directory, inspect_file
+from .reader import KMCReader
 
 
 def cmd_pack(args: argparse.Namespace) -> None:
@@ -193,6 +194,47 @@ def cmd_unpack(args: argparse.Namespace) -> None:
         print(f"Error: archive not found: {archive}", file=sys.stderr)
         sys.exit(1)
 
+    # Selective extraction flags
+    only_patterns = getattr(args, "only", None)
+    tensor_name = getattr(args, "tensor", None)
+    list_only = getattr(args, "list", False)
+    json_output = getattr(args, "json", False)
+
+    # --list mode: just list available files and exit
+    if list_only:
+        try:
+            with KMCReader(archive) as reader:
+                files = reader.list_files()
+                tensors = reader.list_tensors()
+                if json_output:
+                    print(json.dumps({"files": files, "tensors": tensors}, indent=2))
+                else:
+                    print("Available files:")
+                    for f in files:
+                        print(f"  {f}")
+                    if tensors:
+                        print("Available tensors:")
+                        for t in tensors:
+                            print(f"  {t}")
+        except (ValueError, OSError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # Selective extraction via --only or --tensor
+    if only_patterns or tensor_name:
+        try:
+            with KMCReader(archive) as reader:
+                if only_patterns:
+                    _selective_unpack_files(reader, only_patterns, output_dir, json_output)
+                elif tensor_name:
+                    _selective_unpack_tensor(reader, tensor_name, output_dir, json_output)
+        except (ValueError, OSError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # Full unpack (default behavior)
     print(f"Unpacking {archive} -> {output_dir}")
     start = time.time()
     unpack(archive, output_dir)
@@ -254,6 +296,86 @@ def cmd_inspect(args: argparse.Namespace) -> None:
             show_checkpoint=show_checkpoint,
             show_gguf=show_gguf,
         )
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    """List the contents of a .kmc archive."""
+    archive = Path(args.archive)
+    show_files = getattr(args, "files", False)
+    show_tensors = getattr(args, "tensors", False)
+    json_output = getattr(args, "json", False)
+
+    if not archive.exists():
+        print(f"Error: archive not found: {archive}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with KMCReader(archive) as reader:
+            files = reader.list_files()
+            tensors = reader.list_tensors()
+            manifest = reader.get_manifest()
+
+            if json_output:
+                data: dict = {
+                    "archive": str(archive),
+                    "version": manifest.version,
+                    "files": [],
+                    "tensors": [],
+                }
+                for f_path in files:
+                    info = reader.get_file_info(f_path)
+                    entry = {"path": f_path}
+                    if info:
+                        entry["size"] = info.size
+                        entry["sha256"] = info.sha256
+                    data["files"].append(entry)
+                for t_name in tensors:
+                    info = reader.get_tensor_info(t_name)
+                    entry: dict = {"name": t_name}
+                    if info:
+                        entry["file_path"] = info.file_path
+                        entry["dtype"] = info.dtype
+                        entry["shape"] = info.shape
+                    data["tensors"].append(entry)
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+                return
+
+            # Human-readable output
+            print("KMC Archive Contents")
+            print()
+
+            # Show files
+            if show_tensors and not show_files:
+                # Only show tensors
+                pass
+            else:
+                print("Files:")
+                for f_path in files:
+                    info = reader.get_file_info(f_path)
+                    size_str = f" ({_format_size(info.size)})" if info and info.size else ""
+                    print(f"  {f_path}{size_str}")
+                print()
+
+            # Show tensors
+            if show_files and not show_tensors:
+                # Only show files
+                pass
+            else:
+                if tensors:
+                    print("Tensors:")
+                    for t_name in tensors:
+                        info = reader.get_tensor_info(t_name)
+                        if info and info.dtype and info.shape:
+                            shape_str = "x".join(str(d) for d in info.shape)
+                            print(f"  {t_name}  {info.dtype}  [{shape_str}]")
+                        else:
+                            print(f"  {t_name}")
+                else:
+                    if not show_files:
+                        print("Tensors: (none — archive not created with --tensor-aware)")
+    except (ValueError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _format_size(n: int) -> str:
@@ -388,6 +510,28 @@ def _inspect_archive(
         else:
             print("  Tensor-aware: no")
         print()
+
+    # Show partial access info (v0.7+)
+    has_block_offsets = manifest.index.get("has_block_offsets", False) if manifest.index else False
+    has_file_index = manifest.index.get("has_file_index", False) if manifest.index else False
+    has_tensor_index = manifest.index.get("has_tensor_index", False) if manifest.index else False
+
+    # Even without explicit index metadata, we can determine capabilities
+    if not manifest.index:
+        # Reconstruct from manifest content
+        has_block_offsets = any(b.archive_offset > 0 for f in manifest.files for b in f.blocks)
+        has_file_index = len(manifest.files) > 0
+        has_tensor_index = any(b.tensor_name for f in manifest.files for b in f.blocks)
+
+    tensor_status = "supported" if has_tensor_index else "unavailable"
+
+    print("Partial access:")
+    print(f"  Block index: {'yes' if has_block_offsets else 'reconstructed'}")
+    print(f"  File index: {'yes' if has_file_index else 'no'}")
+    print(f"  Tensor index: {'yes' if has_tensor_index else 'unavailable'}")
+    print("  Selective extraction: supported")
+    print(f"  Tensor extraction: {tensor_status}")
+    print()
 
     for fentry in manifest.files:
         print(f"  {fentry.path}")
@@ -860,6 +1004,12 @@ def cmd_bench(args: argparse.Namespace) -> None:
         print(f"Error: source not found: {source}", file=sys.stderr)
         sys.exit(1)
 
+    # Partial-access benchmark
+    partial_access = getattr(args, "partial_access", False)
+    if partial_access:
+        _run_partial_access_bench(args)
+        return
+
     compare_zipnn = getattr(args, "compare_zipnn", False)
     compare_codecs = getattr(args, "compare_codecs", False)
     tensor_aware = getattr(args, "tensor_aware", False)
@@ -885,6 +1035,201 @@ def cmd_bench(args: argparse.Namespace) -> None:
             print(json_output)
     else:
         print(format_benchmark_table(result))
+
+
+def _run_partial_access_bench(args: argparse.Namespace) -> None:
+    """Run a partial-access benchmark on a .kmc archive."""
+    archive = Path(args.source)
+
+    if not archive.exists():
+        print(f"Error: archive not found: {archive}", file=sys.stderr)
+        sys.exit(1)
+
+    if not archive.suffix.lower() == ".kmc":
+        print(f"Error: --partial-access requires a .kmc archive, got: {archive}", file=sys.stderr)
+        sys.exit(1)
+
+    import time as _time
+
+    json_output = getattr(args, "json", False)
+    only_pattern = getattr(args, "only", None)
+    tensor_name = getattr(args, "partial_tensor", None)
+
+    results: dict = {"archive": str(archive)}
+
+    # Measure archive open + index build time
+    t0 = _time.perf_counter()
+    reader = KMCReader(archive)
+    open_time = _time.perf_counter() - t0
+    results["open_time_s"] = round(open_time, 6)
+
+    files = reader.list_files()
+    tensors = reader.list_tensors()
+    results["total_files"] = len(files)
+    results["total_tensors"] = len(tensors)
+    results["total_blocks"] = reader.block_index.total_blocks
+
+    # Measure reading a small file
+    if files:
+        # Find the smallest file
+        smallest_file = None
+        smallest_size = float("inf")
+        for f_path in files:
+            info = reader.get_file_info(f_path)
+            if info and info.size < smallest_size:
+                smallest_size = info.size
+                smallest_file = f_path
+
+        if smallest_file:
+            t0 = _time.perf_counter()
+            data = reader.read_file(smallest_file)
+            read_file_time = _time.perf_counter() - t0
+            results["read_small_file"] = {
+                "path": smallest_file,
+                "size": len(data),
+                "time_s": round(read_file_time, 6),
+            }
+
+    # Measure reading a specific file by pattern
+    if only_pattern:
+        import fnmatch
+
+        matched = [
+            f
+            for f in files
+            if fnmatch.fnmatch(f, only_pattern) or fnmatch.fnmatch(f.split("/")[-1], only_pattern)
+        ]
+        if matched:
+            t0 = _time.perf_counter()
+            data = reader.read_file(matched[0])
+            read_pattern_time = _time.perf_counter() - t0
+            results["read_pattern_file"] = {
+                "path": matched[0],
+                "size": len(data),
+                "time_s": round(read_pattern_time, 6),
+            }
+
+    # Measure reading a tensor
+    if tensor_name and tensors:
+        if reader.get_tensor_info(tensor_name):
+            t0 = _time.perf_counter()
+            tdata = reader.read_tensor(tensor_name)
+            read_tensor_time = _time.perf_counter() - t0
+            results["read_tensor"] = {
+                "name": tensor_name,
+                "size": len(tdata),
+                "time_s": round(read_tensor_time, 6),
+            }
+
+    reader.close()
+
+    if json_output:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+    else:
+        print("=== KMC Partial-Access Benchmark ===")
+        print(f"Archive: {archive}")
+        print(f"Open + index build time: {open_time:.6f}s")
+        print(
+            f"Files: {results['total_files']}, "
+            f"Tensors: {results['total_tensors']}, "
+            f"Blocks: {results['total_blocks']}"
+        )
+        if "read_small_file" in results:
+            r = results["read_small_file"]
+            print(f"Read small file ({r['path']}): {r['time_s']:.6f}s ({r['size']} bytes)")
+        if "read_pattern_file" in results:
+            r = results["read_pattern_file"]
+            print(f"Read pattern file ({r['path']}): {r['time_s']:.6f}s ({r['size']} bytes)")
+        if "read_tensor" in results:
+            r = results["read_tensor"]
+            print(f"Read tensor ({r['name']}): {r['time_s']:.6f}s ({r['size']} bytes)")
+
+
+def _selective_unpack_files(
+    reader: KMCReader,
+    patterns: list[str],
+    output_dir: Path,
+    json_output: bool,
+) -> None:
+    """Extract files matching patterns from an archive."""
+    import fnmatch
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    all_files = reader.list_files()
+    matched: list[str] = []
+    bytes_written = 0
+
+    for pattern in patterns:
+        # Security: reject absolute paths and path traversal
+        if pattern.startswith("/"):
+            print(f"Error: absolute pattern not allowed: {pattern!r}", file=sys.stderr)
+            sys.exit(1)
+        if ".." in pattern.split("/"):
+            print(f"Error: path traversal not allowed: {pattern!r}", file=sys.stderr)
+            sys.exit(1)
+
+        for f_path in all_files:
+            basename = f_path.split("/")[-1]
+            if fnmatch.fnmatch(f_path, pattern) or fnmatch.fnmatch(basename, pattern):
+                if f_path not in matched:
+                    matched.append(f_path)
+
+    if not matched:
+        print("Error: no files matched the given pattern(s)", file=sys.stderr)
+        sys.exit(1)
+
+    for f_path in matched:
+        out_path = reader.extract_file(f_path, output_dir)
+        data_len = out_path.stat().st_size
+        bytes_written += data_len
+        if not json_output:
+            print(f"  Extracted: {f_path} ({_format_size(data_len)})")
+
+    skipped = len(all_files) - len(matched)
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "extracted": matched,
+                    "skipped": skipped,
+                    "bytes_written": bytes_written,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(
+            f"Extracted {len(matched)} file(s), "
+            f"skipped {skipped}, "
+            f"wrote {_format_size(bytes_written)}"
+        )
+
+
+def _selective_unpack_tensor(
+    reader: KMCReader,
+    tensor_name: str,
+    output_dir: Path,
+    json_output: bool,
+) -> None:
+    """Extract a single tensor from an archive."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = reader.extract_tensor(tensor_name, output_dir)
+    data_len = out_path.stat().st_size
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "extracted_tensor": tensor_name,
+                    "output_path": str(out_path),
+                    "bytes_written": data_len,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"  Extracted tensor: {tensor_name} ({_format_size(data_len)}) -> {out_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -982,6 +1327,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--progress",
         action="store_true",
         help="Show progress during operation",
+    )
+    p_unpack.add_argument(
+        "--only",
+        nargs="+",
+        default=None,
+        help="Extract only files matching pattern(s) (e.g., '*.json', 'config.json')",
+    )
+    p_unpack.add_argument(
+        "--tensor",
+        default=None,
+        help="Extract a specific tensor by name",
+    )
+    p_unpack.add_argument(
+        "--list",
+        action="store_true",
+        dest="list",
+        help="List available files without extracting",
+    )
+    p_unpack.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results as JSON",
     )
     p_unpack.set_defaults(func=cmd_unpack)
 
@@ -1088,7 +1455,45 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show progress during operation",
     )
+    p_bench.add_argument(
+        "--partial-access",
+        action="store_true",
+        help=(
+            "Benchmark partial access: measure time to open archive, "
+            "build index, and read individual files/tensors"
+        ),
+    )
+    p_bench.add_argument(
+        "--only",
+        default=None,
+        help="With --partial-access: only read matching file pattern",
+    )
+    p_bench.add_argument(
+        "--partial-tensor",
+        default=None,
+        help="With --partial-access: read a specific tensor by name",
+    )
     p_bench.set_defaults(func=cmd_bench)
+
+    # list
+    p_list = sub.add_parser("list", help="List the contents of a .kmc archive")
+    p_list.add_argument("archive", help=".kmc archive path")
+    p_list.add_argument(
+        "--files",
+        action="store_true",
+        help="Show only files",
+    )
+    p_list.add_argument(
+        "--tensors",
+        action="store_true",
+        help="Show only tensors",
+    )
+    p_list.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results as JSON",
+    )
+    p_list.set_defaults(func=cmd_list)
 
     return parser
 

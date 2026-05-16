@@ -211,6 +211,41 @@ The inspector module identifies AI model formats by examining file magic bytes a
 
 This module provides the original safetensors header parsing functionality. It remains for backward compatibility but the primary implementation has moved to `formats/safetensors.py`. New code should use `formats.safetensors.read_safetensors_info()` instead.
 
+### `index/` -- Partial Access Indexes (v0.7+)
+
+The index subpackage provides structured indexes that map between archive blocks, files, and tensors, enabling selective extraction without decompressing the entire archive. Indexes are built from the manifest on open and support efficient lookup by ID, path, or tensor name.
+
+#### `index/block_index.py` -- Block Index
+
+`BlockIndex` maps each compressed block to its physical location in the archive. Each entry is a `BlockLocation` dataclass containing the block ID, file path, tensor name, archive offset, compressed size, original size, codec, codec metadata, and block hash. The index supports lookup by block ID, by file path (returns all blocks for a file), and by tensor name (returns all blocks for a tensor). When the manifest lacks physical block offsets (common in older archives created before v0.7), the `from_manifest()` class method automatically reconstructs offsets by computing cumulative block positions from the archive header.
+
+#### `index/file_index.py` -- File Index
+
+`FileIndex` maps file paths to `FileLocation` objects containing the file's original size, SHA-256 hash, and the ordered list of block IDs that compose it. The index also provides pattern matching via `match_pattern()`, which supports fnmatch-style glob patterns (e.g., `*.json`, `tokenizer*`). This enables efficient file-level selective extraction by identifying which blocks need to be read for a given file or pattern.
+
+#### `index/tensor_index.py` -- Tensor Index
+
+`TensorIndex` maps tensor names to `TensorLocation` objects containing the tensor's dtype, shape, file path, and block IDs. This index is only populated for archives created with `--tensor-aware` mode, since tensor metadata is required to build the mapping. The `available` property returns whether tensor-level access is possible. The index merges information from both file-level `tensor_entries` (from safetensors metadata) and block-level `tensor_name`/`tensor_dtype`/`tensor_shape` fields (from codec context), preferring file-level entries for dtype and shape when both sources are available.
+
+### `reader.py` -- KMCReader Partial Access API (v0.7+)
+
+`KMCReader` is the primary Python API for partial access to `.kmc` archives. It opens an archive, reads the manifest, builds all three indexes (block, file, tensor), and provides methods for listing, reading, and extracting specific files or tensors without full decompression.
+
+Key design decisions for `KMCReader`:
+
+- **Context manager support.** `KMCReader` implements `__enter__`/`__exit__` for automatic resource cleanup. File handles are opened per-operation and closed between reads, avoiding the need for explicit handle management.
+- **Per-operation file access.** Rather than keeping the archive file handle open for the lifetime of the reader, each read operation opens the file, seeks to the required offset, reads the block data, and closes the handle. This approach is safe for sequential access and avoids resource leaks if the reader is not properly closed.
+- **Block checksum verification.** Every block read is verified against its SHA-256 hash from the manifest before decompression. File-level reads additionally verify the reconstructed file hash after concatenating all decompressed blocks. This ensures that partial reads maintain the same integrity guarantees as full unpack operations.
+- **Graceful degradation for tensor access.** When a tensor has no dedicated block mapping (because it was not packed with tensor-aware block alignment), `read_tensor()` attempts to locate the tensor data within its parent file using the file-level `tensor_entries` metadata. This provides best-effort tensor access even when blocks are not individually aligned to tensor boundaries.
+
+### `loaders/` -- Experimental Tensor Loaders (v0.7+)
+
+The loaders subpackage provides experimental functionality for converting tensor bytes into native tensor objects (PyTorch or NumPy). It is optional and depends on external packages that are not required for core KMC functionality.
+
+#### `loaders/safetensors_loader.py` -- Safetensors Tensor Loader
+
+Provides two functions: `load_tensor_bytes()` returns raw bytes (no optional dependencies) and `load_tensor()` returns native tensor objects (requires PyTorch or NumPy). The loader handles dtype mapping from safetensors format strings (BF16, FP16, FP32, etc.) to framework-native dtypes. BF16 tensors require PyTorch since NumPy does not natively support bfloat16. This module is experimental and its API may change without notice.
+
 ### `benchmark.py` -- Performance Benchmarking
 
 The benchmark module measures KMC performance and compares it against other tools:
@@ -316,6 +351,40 @@ Source checkpoint directory (e.g., checkpoint-1000/)
     Write archive with v4 manifest
 ```
 
+### Partial Access Operation (v0.7+)
+
+```
+Open .kmc archive
+        |
+    Read manifest
+        |
+    Build indexes:
+    - BlockIndex (archive_offset -> BlockLocation)
+    - FileIndex (path -> FileLocation + block_ids)
+    - TensorIndex (name -> TensorLocation + block_ids)
+        |
+    read_file("config.json"):
+        |
+    FileIndex.get("config.json") -> FileLocation
+        |
+    For each block_id in FileLocation.block_ids:
+        BlockIndex.get_by_id(block_id) -> BlockLocation
+            |
+        Seek to archive_offset in .kmc file
+            |
+        Read compressed_size bytes
+            |
+        Verify block hash (SHA-256)
+            |
+        Decompress using codec + codec_metadata
+        |
+    Concatenate decompressed blocks
+        |
+    Verify file hash (SHA-256)
+        |
+    Return bytes
+```
+
 ### Unpack Operation
 
 ```
@@ -391,15 +460,26 @@ Future improvements:
 - **Block-level GGUF compression**: Skip already-quantized blocks entirely (store raw), compress only metadata and vocabulary sections.
 - **GGUF tensor-aligned blocks**: Align block boundaries to GGUF tensor boundaries for partial loading.
 
-### Block-Level Loading
+### Block-Level Loading (v0.7 -- Implemented)
 
-The current design stores all blocks sequentially, but the manifest already contains per-block offsets and codec metadata. A future "block server" could serve individual blocks on demand, enabling:
-- Loading specific layers of a model without downloading the entire file.
-- Streaming decompression for large models.
-- Memory-mapped access to specific tensor regions.
-- **Runtime compressed loading**: Decompress blocks on-the-fly during inference (research phase).
+Block-level loading is now implemented via the `KMCReader` class and the `index/` subpackage. The manifest v6 stores per-block `archive_offset` values that enable direct seeking to any block without scanning preceding data. The `KMCReader` API supports:
+
+- Reading specific files without decompressing the entire archive (`read_file()`).
+- Reading specific tensors by name without decompressing the entire archive (`read_tensor()`).
+- Extracting individual files or tensors to disk (`extract_file()`, `extract_tensor()`).
+- Listing archive contents without decompression (`list_files()`, `list_tensors()`).
+
+For older archives without `archive_offset` values, the block index automatically reconstructs offsets from the archive layout. This provides partial access support for all KMC archives, not just those created with v0.7.
 
 > **Important:** Block-level loading does NOT reduce inference VRAM. The decompressed blocks still occupy the same memory. Runtime compressed loading (keeping blocks compressed in memory) is future research.
+
+### Runtime Integration (Future)
+
+The current partial access API provides raw data access but does not integrate with ML frameworks. Future work includes:
+- Integration with Hugging Face `from_pretrained()` loading.
+- Integration with llama.cpp GGUF loading.
+- Block server for remote block fetching (HTTP/gRPC).
+- Runtime compressed loading (research phase — keeping blocks compressed in memory).
 
 ### Parallel Processing
 

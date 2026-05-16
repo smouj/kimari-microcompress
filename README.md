@@ -9,8 +9,8 @@
 [![CI](https://github.com/smouj/kimari-microcompress/actions/workflows/ci.yml/badge.svg)](https://github.com/smouj/kimari-microcompress/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.5.0--alpha-orange.svg)](https://github.com/smouj/kimari-microcompress/releases)
-[![Tests](https://img.shields.io/badge/tests-228%20passing-brightgreen.svg)](https://github.com/smouj/kimari-microcompress/actions)
+[![Version](https://img.shields.io/badge/version-0.7.0--alpha-orange.svg)](https://github.com/smouj/kimari-microcompress/releases)
+[![Tests](https://img.shields.io/badge/tests-330%20passing-brightgreen.svg)](https://github.com/smouj/kimari-microcompress/actions)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-DB7093.svg)](https://docs.astral.sh/ruff/)
 
 </div>
@@ -21,14 +21,16 @@
 
 > **Please read before using KMC:**
 
-- **KMC does NOT reduce VRAM during inference.** It is designed for storage, transfer, and verification — not runtime memory optimization.
+- **KMC does NOT perform compressed inference.** It is designed for storage, transfer, and verification — not runtime memory optimization. Partial access decompresses data before returning it.
 - **KMC does NOT modify model weights.** Compression is lossless and reversible; every byte is preserved exactly.
-- **Block-loading (partial decompression) is future research.** The format stores blocks with offsets, but on-demand block serving is not yet implemented.
+- **Partial tensor loading returns bytes.** The `read_tensor` method and `--tensor` flag return raw bytes. To convert to native tensor objects (PyTorch, NumPy), the experimental safetensors loader is required and depends on optional tensor libraries being installed.
+- **Tensor extraction depends on tensor metadata.** Archives must be created with `--tensor-aware` mode for tensor-level partial access. Older archives support file-level partial access but not tensor-level access.
 - **GGUF-aware compression is experimental.** The `--gguf-aware` flag adjusts codec selection for quantized GGUF tensors but does not yet implement block-level GGUF-specific compression strategies.
 - **No fixed compression ratios should be assumed.** Results vary significantly by model format, data type, and content. Synthetic benchmarks do not represent real-world ratios.
 - **KMC is not a replacement for quantization.** If you need smaller models for inference, use quantization (GGUF Q4_K, GPTQ, AWQ, etc.). KMC is complementary: it compresses already-quantized files for storage/transfer.
 - **No pickle is used.** KMC never deserializes pickle-based files. Only presence, size, and hash are recorded.
 - **KMC is lossless only.** There is no lossy mode and no weight modification of any kind.
+- **Safetensors loader is experimental.** The `load_tensor()` function may change without notice between versions.
 
 ---
 
@@ -79,20 +81,20 @@ Kimari MicroCompress (KMC) is an experimental tool for **lossless, reversible co
 | `kmc pack-lora` — LoRA adapter workflow | ✅ Working |
 | `kmc pack-checkpoint` — Training checkpoint workflow | ✅ Working |
 | `kmc unpack` — Decompress archives (path-safe) | ✅ Working |
+| `kmc unpack --only PATTERN` — Selective file extraction | ✅ Working |
+| `kmc unpack --tensor NAME` — Selective tensor extraction | ✅ Working |
+| `kmc unpack --list` — List archive contents before extracting | ✅ Working |
 | `kmc verify` — Full verification report | ✅ Working |
 | `kmc inspect` — AI model inspection with tensor metadata | ✅ Working |
-| `kmc inspect --json` — JSON output for scripting | ✅ Working |
-| `kmc inspect --tensors` — Detailed tensor information | ✅ Working |
-| `kmc inspect --lora` — LoRA adapter inspection | ✅ Working |
-| `kmc inspect --checkpoint` — Training checkpoint inspection | ✅ Working |
-| `kmc inspect --gguf` — GGUF model inspection with tensor details | ✅ Working |
-| `kmc bench` — Benchmark with codec comparison | ✅ Working |
-| `kmc bench --compare-codecs` — Multi-codec comparison | ✅ Working |
-| `kmc bench --compare-zipnn` — ZipNN comparison | ✅ Working |
+| `kmc inspect` — Partial access info display | ✅ Working |
+| `kmc list` — List archive files and tensors | ✅ Working |
+| `kmc bench --partial-access` — Partial access benchmarks | ✅ Working |
+| KMCReader Python API — Partial access without full decompression | ✅ Working |
+| Experimental safetensors tensor loader | 🧪 Experimental |
 | Artifact auto-detection (HuggingFace, GGUF, LoRA, checkpoint) | ✅ Working |
 | GGUF tensor metadata parser (names, shapes, types, offsets, sizes) | ✅ Working |
 | GGUF quantization summary (Q4_K, Q5_1, F32, etc.) | ✅ Working |
-| Manifest v4 with artifact_type, artifact_metadata, format_metadata | ✅ Working |
+| Manifest v6 with index metadata and archive_offset | ✅ Working |
 | SHA-256 per-file and per-block hashing | ✅ Working |
 | 256 KiB micro-blocks (configurable) | ✅ Working |
 | zstd / zlib / raw / byteplane / floatplane codec selection | ✅ Working |
@@ -100,9 +102,9 @@ Kimari MicroCompress (KMC) is an experimental tool for **lossless, reversible co
 | safetensors real tensor metadata (names, shapes, dtypes, offsets) | ✅ Working |
 | LoRA/PEFT adapter detection with rank and target modules | ✅ Working |
 | Path traversal protection in unpack | ✅ Working |
-| Backward compatible with .kmc v0.2/v0.3/v0.4 | ✅ Working |
+| Backward compatible with .kmc v0.2/v0.3/v0.4/v0.5/v0.6 | ✅ Working |
 | GGUF block-level compression | 🔬 Research |
-| Block-loading (partial decompression) | 🔬 Research |
+| Runtime compressed loading (keeping blocks compressed in memory) | 🔬 Research |
 
 ---
 
@@ -199,6 +201,7 @@ kmc bench ./my-model ./my-model-bench.kmc --compare-zipnn --json --output report
 | `kmc unpack ARCHIVE OUTPUT` | Decompress a `.kmc` archive |
 | `kmc verify ARCHIVE` | Full integrity verification report |
 | `kmc inspect TARGET` | Inspect archive or AI model directory |
+| `kmc list ARCHIVE` | List files and tensors in an archive |
 | `kmc bench SOURCE OUTPUT` | Benchmark compression performance |
 
 ### Key Flags
@@ -208,12 +211,16 @@ kmc bench ./my-model ./my-model-bench.kmc --compare-zipnn --json --output report
 | `--tensor-aware` | pack | Align blocks to tensor boundaries for safetensors files |
 | `--gguf-aware` | pack | Adjust codec selection for quantized GGUF tensors |
 | `--codec` | pack, bench | Codec: `auto`, `byteplane`, `floatplane`, `zstd`, `zlib`, `raw` |
+| `--only PATTERN` | unpack | Extract only files matching a glob pattern |
+| `--tensor NAME` | unpack | Extract a specific tensor by name |
+| `--list` | unpack | List available files/tensors without extracting |
 | `--lora` | inspect | Inspect as LoRA adapter |
 | `--checkpoint` | inspect | Inspect as training checkpoint |
 | `--gguf` | inspect | Inspect as GGUF model with tensor details |
-| `--tensors` | inspect | Show detailed tensor information |
+| `--tensors` | inspect, list | Show detailed tensor information |
 | `--compression` | inspect | Show compression summary with codec usage |
-| `--json` | inspect, bench | Output as JSON |
+| `--partial-access` | bench | Benchmark partial access performance |
+| `--json` | inspect, bench, list, unpack | Output as JSON |
 | `--compare-codecs` | bench | Compare all available codecs |
 | `--compare-zipnn` | bench | Compare with ZipNN (if installed) |
 
@@ -221,7 +228,7 @@ kmc bench ./my-model ./my-model-bench.kmc --compare-zipnn --json --output report
 
 ## Codecs
 
-KMC v0.5 supports six codecs, selected per-block for optimal results:
+KMC v0.7 supports six codecs, selected per-block for optimal results:
 
 | Codec | Type | Best For | Description |
 |-------|------|----------|-------------|
@@ -285,7 +292,8 @@ src/kmc/
 ├── cli.py                  # Command-line interface
 ├── hashing.py              # SHA-256 integrity hashing
 ├── inspector.py            # AI model format detection with metadata
-├── manifest.py             # KMC manifest (v4: artifact_type, format_metadata)
+├── manifest.py             # KMC manifest (v6: index, archive_offset)
+├── reader.py               # KMCReader partial-access API (v0.7+)
 ├── gguf.py                 # Legacy GGUF module (see formats/gguf.py)
 ├── tensor_inspector.py     # Legacy safetensors metadata (see formats/)
 ├── codecs/
@@ -303,6 +311,14 @@ src/kmc/
 │   ├── __init__.py         # Format module registry
 │   ├── safetensors.py      # Safetensors metadata, shards, LoRA detection
 │   └── gguf.py             # GGUF header + tensor metadata parsing (v0.5+)
+├── index/
+│   ├── __init__.py         # Index module exports
+│   ├── block_index.py      # BlockIndex: block ID -> BlockLocation
+│   ├── file_index.py       # FileIndex: file path -> FileLocation
+│   └── tensor_index.py     # TensorIndex: tensor name -> TensorLocation
+├── loaders/
+│   ├── __init__.py         # Loader module exports
+│   └── safetensors_loader.py  # Experimental tensor-byte loader (v0.7+)
 ├── workflows/
 │   ├── __init__.py         # Workflow module registry
 │   ├── lora.py             # LoRA/PEFT adapter detection and packing
@@ -312,6 +328,50 @@ src/kmc/
 ```
 
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed design decisions.
+
+---
+
+## Partial Access
+
+KMC v0.7 introduces partial access features that allow reading specific files and tensors from `.kmc` archives without full decompression. This is powered by the `KMCReader` Python API and the `--only`/`--tensor`/`--list` CLI flags.
+
+### Python API
+
+```python
+from kmc.reader import KMCReader
+
+with KMCReader("model.kmc") as reader:
+    # List contents
+    files = reader.list_files()
+    tensors = reader.list_tensors()
+
+    # Read specific files without full decompression
+    config = reader.read_file("config.json")
+    weight_bytes = reader.read_tensor("model.layers.0.mlp.down_proj.weight")
+
+    # Extract to disk
+    reader.extract_file("config.json", "./output/")
+```
+
+### CLI Selective Extraction
+
+```bash
+# List archive contents
+kmc list model.kmc
+
+# Extract only JSON files
+kmc unpack model.kmc ./output --only "*.json"
+
+# Extract a specific tensor
+kmc unpack model.kmc ./output --tensor "transformer.h.0.attn.weight"
+
+# List before extracting
+kmc unpack model.kmc ./output --list
+```
+
+**Important:** Partial access decompresses the requested data before returning it. It does NOT reduce VRAM during inference. Tensor extraction requires archives created with `--tensor-aware` mode.
+
+See [PARTIAL_ACCESS.md](docs/PARTIAL_ACCESS.md) and [KMC_READER_API.md](docs/KMC_READER_API.md) for details.
 
 ---
 
@@ -336,8 +396,12 @@ See [SECURITY_MODEL.md](docs/SECURITY_MODEL.md) for the complete security model.
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/ARCHITECTURE.md) | Design decisions and module structure |
-| [Format Specification](docs/FORMAT_SPEC.md) | Complete `.kmc` format spec (v4) |
+| [Format Specification](docs/FORMAT_SPEC.md) | Complete `.kmc` format spec (v6) |
 | [Security Model](docs/SECURITY_MODEL.md) | Threat model and mitigations |
+| [Partial Access](docs/PARTIAL_ACCESS.md) | Partial access features and architecture |
+| [KMCReader API](docs/KMC_READER_API.md) | Python API reference for partial access |
+| [Selective Extraction](docs/SELECTIVE_EXTRACTION.md) | CLI selective extraction guide |
+| [Experimental Loaders](docs/EXPERIMENTAL_LOADERS.md) | Safetensors tensor loader documentation |
 | [GGUF Support](docs/GGUF_SUPPORT.md) | GGUF parsing and `--gguf-aware` mode |
 | [LoRA Workflow](docs/LORA_WORKFLOW.md) | LoRA adapter compression and inspection |
 | [Checkpoint Workflow](docs/CHECKPOINT_WORKFLOW.md) | Training checkpoint compression and inspection |

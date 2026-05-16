@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kimari MicroCompress (KMC) — Reversible Lossless Compression for AI Models</title>
+  <meta name="description" content="KMC is a reversible lossless compression tool for AI model files. Supports safetensors, GGUF, LoRA/PEFT, and training checkpoints.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%236366f1'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-size='20' font-weight='bold' fill='white' text-anchor='middle'%3EK%3C/text%3E%3C/svg%3E">
+  <style>
+    /* ============================================
+       CSS Custom Properties & Theme
+       ============================================ */
+    :root {
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --radius-lg: 20px;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+      --shadow-md: 0 4px 12px rgba(0,0,0,0.12);
+      --shadow-lg: 0 8px 30px rgba(0,0,0,0.18);
+      --transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    [data-theme="dark"] {
+      --bg-primary: #0a0b10;
+      --bg-secondary: #12131a;
+      --bg-tertiary: #1a1b26;
+      --bg-card: #161722;
+      --bg-card-hover: #1e1f2e;
+      --bg-code: #1a1b2e;
+      --bg-badge: #252640;
+      --text-primary: #e8e9f0;
+      --text-secondary: #9da1b8;
+      --text-tertiary: #6b6f88;
+      --accent-primary: #6366f1;
+      --accent-secondary: #818cf8;
+      --accent-tertiary: #a5b4fc;
+      --accent-gradient: linear-gradient(135deg, #6366f1, #8b5cf6, #a78bfa);
+      --accent-gradient-text: linear-gradient(135deg, #818cf8, #a78bfa, #c4b5fd);
+      --border-color: #252640;
+      --border-accent: #363660;
+      --warning-bg: #1c1608;
+      --warning-border: #4a3c12;
+      --warning-text: #fbbf24;
+      --warning-icon: #f59e0b;
+      --success-bg: #081c10;
+      --success-border: #124a26;
+      --success-text: #34d399;
+      --code-keyword: #c792ea;
+      --code-string: #c3e88d;
+      --code-comment: #6b6f88;
+      --code-function: #82aaff;
+      --code-number: #f78c6c;
+      --code-variable: #e8e9f0;
+      --scrollbar-bg: #12131a;
+      --scrollbar-thumb: #363660;
+    }
+
+    [data-theme="light"] {
+      --bg-primary: #ffffff;
+      --bg-secondary: #f8f9fc;
+      --bg-tertiary: #f0f1f6;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f4f5fa;
+      --bg-code: #f4f5fa;
+      --bg-badge: #eef0ff;
+      --text-primary: #1a1b2e;
+      --text-secondary: #555770;
+      --text-tertiary: #8888a0;
+      --accent-primary: #4f46e5;
+      --accent-secondary: #6366f1;
+      --accent-tertiary: #818cf8;
+      --accent-gradient: linear-gradient(135deg, #4f46e5, #7c3aed, #8b5cf6);
+      --accent-gradient-text: linear-gradient(135deg, #4f46e5, #7c3aed, #8b5cf6);
+      --border-color: #e2e3ee;
+      --border-accent: #c7c8e0;
+      --warning-bg: #fffbeb;
+      --warning-border: #fde68a;
+      --warning-text: #92400e;
+      --warning-icon: #f59e0b;
+      --success-bg: #f0fdf4;
+      --success-border: #bbf7d0;
+      --success-text: #166534;
+      --code-keyword: #7c3aed;
+      --code-string: #16a34a;
+      --code-comment: #9ca3af;
+      --code-function: #2563eb;
+      --code-number: #ea580c;
+      --code-variable: #1a1b2e;
+      --scrollbar-bg: #f0f1f6;
+      --scrollbar-thumb: #c7c8e0;
+    }
+
+    /* ============================================
+       Reset & Base
+       ============================================ */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 80px;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overflow-x: hidden;
+      transition: background-color var(--transition), color var(--transition);
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: var(--scrollbar-bg);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border-radius: 4px;
+    }
+
+    a {
+      color: var(--accent-secondary);
+      text-decoration: none;
+      transition: color var(--transition);
+    }
+    a:hover {
+      color: var(--accent-tertiary);
+    }
+
+    /* ============================================
+       Navigation
+       ============================================ */
+    .navbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      transition: background-color var(--transition), border-color var(--transition);
+    }
+
+    [data-theme="dark"] .navbar {
+      background: rgba(10, 11, 16, 0.85);
+    }
+    [data-theme="light"] .navbar {
+      background: rgba(255, 255, 255, 0.85);
+    }
+
+    .navbar-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .navbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--text-primary);
+    }
+    .navbar-brand:hover {
+      color: var(--text-primary);
+    }
+
+    .navbar-logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: var(--accent-gradient);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 1rem;
+    }
+
+    .navbar-links {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .navbar-links a {
+      padding: 6px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: all var(--transition);
+    }
+    .navbar-links a:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+
+    .theme-toggle {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 1rem;
+      transition: all var(--transition);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .theme-toggle:hover {
+      background: var(--bg-card-hover);
+      color: var(--text-primary);
+      border-color: var(--border-accent);
+    }
+
+    .mobile-menu-btn {
+      display: none;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 1.5rem;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    /* ============================================
+       Container & Sections
+       ============================================ */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    section {
+      padding: 100px 0;
+    }
+
+    .section-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--accent-secondary);
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: 2.25rem;
+      font-weight: 800;
+      line-height: 1.2;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+    }
+
+    .section-description {
+      font-size: 1.1rem;
+      color: var(--text-secondary);
+      max-width: 640px;
+      line-height: 1.7;
+    }
+
+    /* ============================================
+       Hero Section
+       ============================================ */
+    .hero {
+      padding: 160px 0 120px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -200px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 800px;
+      background: radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    [data-theme="light"] .hero::before {
+      background: radial-gradient(circle, rgba(99,102,241,0.06) 0%, transparent 60%);
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      background: var(--bg-badge);
+      border: 1px solid var(--border-accent);
+      border-radius: 100px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--accent-secondary);
+      margin-bottom: 32px;
+    }
+
+    .hero-badge .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #34d399;
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .hero h1 {
+      font-size: clamp(2.5rem, 6vw, 4rem);
+      font-weight: 900;
+      line-height: 1.1;
+      margin-bottom: 20px;
+      letter-spacing: -0.02em;
+    }
+
+    .hero h1 .gradient-text {
+      background: var(--accent-gradient-text);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero-tagline {
+      font-size: clamp(1.1rem, 2.5vw, 1.35rem);
+      color: var(--text-secondary);
+      max-width: 600px;
+      margin: 0 auto 40px;
+      line-height: 1.6;
+    }
+
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      border-radius: var(--radius-sm);
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--transition);
+      border: none;
+      text-decoration: none;
+    }
+
+    .btn-primary {
+      background: var(--accent-gradient);
+      color: #fff;
+      box-shadow: 0 4px 16px rgba(99,102,241,0.3);
+    }
+    .btn-primary:hover {
+      box-shadow: 0 6px 24px rgba(99,102,241,0.45);
+      transform: translateY(-1px);
+      color: #fff;
+    }
+
+    .btn-secondary {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border: 1px solid var(--border-color);
+    }
+    .btn-secondary:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-accent);
+      color: var(--text-primary);
+    }
+
+    .hero-meta {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      margin-top: 48px;
+      flex-wrap: wrap;
+    }
+
+    .hero-meta-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.85rem;
+      color: var(--text-tertiary);
+    }
+
+    .hero-meta-item .icon {
+      font-size: 1rem;
+    }
+
+    /* ============================================
+       Features Section
+       ============================================ */
+    .features {
+      background: var(--bg-secondary);
+      transition: background-color var(--transition);
+    }
+
+    .features-header {
+      text-align: center;
+      margin-bottom: 64px;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 28px;
+      transition: all var(--transition);
+    }
+    .feature-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-accent);
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .feature-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      background: var(--bg-badge);
+      border: 1px solid var(--border-accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      margin-bottom: 16px;
+    }
+
+    .feature-card h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: var(--text-primary);
+    }
+
+    .feature-card p {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    /* ============================================
+       Quick Start Section
+       ============================================ */
+    .quickstart {
+      background: var(--bg-primary);
+      transition: background-color var(--transition);
+    }
+
+    .quickstart-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-top: 48px;
+    }
+
+    .code-block {
+      background: var(--bg-code);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: all var(--transition);
+    }
+
+    .code-block-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border-color);
+      background: var(--bg-secondary);
+    }
+
+    .code-block-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+
+    .code-block-copy {
+      background: none;
+      border: none;
+      color: var(--text-tertiary);
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 4px 8px;
+      border-radius: 4px;
+      transition: all var(--transition);
+    }
+    .code-block-copy:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+
+    .code-block pre {
+      padding: 20px;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.7;
+      color: var(--text-primary);
+    }
+
+    .code-block code {
+      font-family: inherit;
+    }
+
+    /* Syntax highlighting classes */
+    .hl-keyword { color: var(--code-keyword); }
+    .hl-string { color: var(--code-string); }
+    .hl-comment { color: var(--code-comment); font-style: italic; }
+    .hl-function { color: var(--code-function); }
+    .hl-number { color: var(--code-number); }
+    .hl-variable { color: var(--code-variable); }
+    .hl-flag { color: var(--accent-tertiary); }
+
+    /* ============================================
+       API Section
+       ============================================ */
+    .api-section {
+      background: var(--bg-secondary);
+      transition: background-color var(--transition);
+    }
+
+    .api-content {
+      margin-top: 48px;
+    }
+
+    .api-code {
+      max-width: 800px;
+    }
+
+    .api-note {
+      margin-top: 24px;
+      padding: 16px 20px;
+      background: var(--success-bg);
+      border: 1px solid var(--success-border);
+      border-radius: var(--radius-sm);
+      color: var(--success-text);
+      font-size: 0.875rem;
+      line-height: 1.6;
+    }
+
+    /* ============================================
+       CLI Section
+       ============================================ */
+    .cli-section {
+      background: var(--bg-primary);
+      transition: background-color var(--transition);
+    }
+
+    .cli-content {
+      margin-top: 48px;
+    }
+
+    .cli-table-wrap {
+      overflow-x: auto;
+      margin-top: 32px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+    }
+
+    .cli-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+
+    .cli-table th {
+      text-align: left;
+      padding: 12px 20px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      white-space: nowrap;
+    }
+
+    .cli-table td {
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border-color);
+      color: var(--text-primary);
+    }
+
+    .cli-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .cli-table code {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      background: var(--bg-code);
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: var(--accent-tertiary);
+    }
+
+    /* ============================================
+       Warnings Section
+       ============================================ */
+    .warnings-section {
+      background: var(--bg-secondary);
+      transition: background-color var(--transition);
+    }
+
+    .warnings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      margin-top: 48px;
+    }
+
+    .warning-card {
+      padding: 20px 24px;
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      border-radius: var(--radius);
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      transition: all var(--transition);
+    }
+
+    .warning-icon {
+      flex-shrink: 0;
+      font-size: 1.25rem;
+      color: var(--warning-icon);
+      margin-top: 2px;
+    }
+
+    .warning-card h4 {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--warning-text);
+      margin-bottom: 4px;
+    }
+
+    .warning-card p {
+      font-size: 0.825rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    /* ============================================
+       Links Section
+       ============================================ */
+    .links-section {
+      background: var(--bg-primary);
+      transition: background-color var(--transition);
+    }
+
+    .links-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-top: 48px;
+    }
+
+    .link-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 32px 24px;
+      text-align: center;
+      transition: all var(--transition);
+      text-decoration: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    .link-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-accent);
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .link-card .link-icon {
+      font-size: 2rem;
+    }
+
+    .link-card h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .link-card p {
+      font-size: 0.825rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .link-card .link-arrow {
+      font-size: 0.8rem;
+      color: var(--accent-secondary);
+      margin-top: auto;
+      padding-top: 8px;
+    }
+
+    /* ============================================
+       Footer
+       ============================================ */
+    .footer {
+      padding: 48px 0;
+      border-top: 1px solid var(--border-color);
+      background: var(--bg-secondary);
+      transition: all var(--transition);
+    }
+
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .footer-logo {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: var(--accent-gradient);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 0.85rem;
+    }
+
+    .footer-copy {
+      font-size: 0.825rem;
+      color: var(--text-tertiary);
+    }
+
+    .footer-license {
+      font-size: 0.825rem;
+      color: var(--text-tertiary);
+    }
+
+    .footer-license a {
+      color: var(--accent-secondary);
+    }
+
+    /* ============================================
+       Responsive
+       ============================================ */
+    @media (max-width: 900px) {
+      .features-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .quickstart-grid {
+        grid-template-columns: 1fr;
+      }
+      .warnings-grid {
+        grid-template-columns: 1fr;
+      }
+      .links-grid {
+        grid-template-columns: 1fr;
+      }
+      .navbar-links {
+        display: none;
+      }
+      .mobile-menu-btn {
+        display: block;
+      }
+      .navbar-links.open {
+        display: flex;
+        flex-direction: column;
+        position: absolute;
+        top: 64px;
+        left: 0;
+        right: 0;
+        background: var(--bg-secondary);
+        border-bottom: 1px solid var(--border-color);
+        padding: 16px;
+        gap: 4px;
+      }
+      .navbar-links.open a {
+        padding: 10px 14px;
+      }
+    }
+
+    @media (max-width: 600px) {
+      section {
+        padding: 72px 0;
+      }
+      .hero {
+        padding: 120px 0 80px;
+      }
+      .features-grid {
+        grid-template-columns: 1fr;
+      }
+      .hero h1 {
+        font-size: 2rem;
+      }
+      .hero-tagline {
+        font-size: 1rem;
+      }
+      .section-title {
+        font-size: 1.75rem;
+      }
+      .hero-meta {
+        gap: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- ============================================
+       Navigation
+       ============================================ -->
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a href="#" class="navbar-brand">
+        <div class="navbar-logo">K</div>
+        <span>Kimari MicroCompress</span>
+      </a>
+      <div class="navbar-links" id="navLinks">
+        <a href="#features">Features</a>
+        <a href="#quickstart">Quick Start</a>
+        <a href="#api">API</a>
+        <a href="#cli">CLI</a>
+        <a href="#warnings">Warnings</a>
+        <a href="#links">Links</a>
+        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+          <span id="themeIcon">&#9790;</span>
+        </button>
+      </div>
+      <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Menu">&#9776;</button>
+    </div>
+  </nav>
+
+  <!-- ============================================
+       Hero Section
+       ============================================ -->
+  <section class="hero" id="hero">
+    <div class="container">
+      <div class="hero-badge">
+        <span class="dot"></span>
+        v0.7.0-alpha
+      </div>
+      <h1>
+        Kimari MicroCompress<br>
+        <span class="gradient-text">(KMC)</span>
+      </h1>
+      <p class="hero-tagline">
+        Reversible lossless compression for AI models.<br>
+        Storage, transfer, and verification &mdash; without modifying weights.
+      </p>
+      <div class="hero-actions">
+        <a href="#quickstart" class="btn btn-primary">
+          <span>Get Started</span> <span>&rarr;</span>
+        </a>
+        <a href="https://github.com/smouj/kimari-microcompress" class="btn btn-secondary" target="_blank" rel="noopener">
+          <span>GitHub</span> <span>&#8599;</span>
+        </a>
+      </div>
+      <div class="hero-meta">
+        <span class="hero-meta-item">
+          <span class="icon">&#128274;</span> Lossless &amp; Deterministic
+        </span>
+        <span class="hero-meta-item">
+          <span class="icon">&#9889;</span> Parallel Compression
+        </span>
+        <span class="hero-meta-item">
+          <span class="icon">&#128065;</span> Partial Access
+        </span>
+        <span class="hero-meta-item">
+          <span class="icon">&#128640;</span> No Pickle
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================
+       Features Section
+       ============================================ -->
+  <section class="features" id="features">
+    <div class="container">
+      <div class="features-header">
+        <div class="section-label">&#9733; Features</div>
+        <h2 class="section-title">Built for AI Model Workflows</h2>
+        <p class="section-description" style="margin:0 auto;">
+          Tensor-aware codecs, partial access, selective extraction, and more &mdash; designed specifically for safetensors, GGUF, LoRA, and training checkpoints.
+        </p>
+      </div>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">&#128228;</div>
+          <h3>Streaming I/O</h3>
+          <p>Process large model files without loading everything into memory. Streaming reads and writes keep memory usage flat.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#9889;</div>
+          <h3>Parallel Compression</h3>
+          <p>Compress blocks in parallel with <code>--jobs N</code>. Utilize multiple CPU cores for faster packing on large models.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128065;</div>
+          <h3>Partial Access via KMCReader</h3>
+          <p>Read individual files or tensors from an archive without full decompression. Built-in block, file, and tensor indexes.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#127919;</div>
+          <h3>Selective Extraction</h3>
+          <p>Extract only what you need with <code>--only</code> and <code>--tensor</code> flags. No full unpack required.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128209;</div>
+          <h3>Block / File / Tensor Indexes</h3>
+          <p>Three-level indexing for efficient lookups. Block offsets, file-to-block maps, and tensor-to-block maps built on open.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#127912;</div>
+          <h3>Tensor-Aware Codecs</h3>
+          <p>BytePlane and FloatPlane codecs exploit tensor structure for better compression on FP32, BF16, and FP16 data.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128196;</div>
+          <h3>safetensors &amp; GGUF Metadata</h3>
+          <p>Full metadata parsing for safetensors (shards, dtypes, shapes) and GGUF (quantization types, tensor layout).</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128256;</div>
+          <h3>LoRA / PEFT &amp; Checkpoint Workflows</h3>
+          <p>Specialized workflows for LoRA adapters and training checkpoints with artifact-type detection and metadata.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#128274;</div>
+          <h3>Deterministic &amp; Lossless</h3>
+          <p>Every byte preserved exactly. SHA-256 verification at file and block level. No pickle used anywhere.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================
+       Quick Start Section
+       ============================================ -->
+  <section class="quickstart" id="quickstart">
+    <div class="container">
+      <div class="section-label">&#9654; Quick Start</div>
+      <h2 class="section-title">Get Up and Running</h2>
+      <p class="section-description">Install KMC and start compressing your AI models in minutes.</p>
+      <div class="quickstart-grid">
+        <div class="code-block">
+          <div class="code-block-header">
+            <span class="code-block-title">Installation</span>
+            <button class="code-block-copy" onclick="copyCode(this)">Copy</button>
+          </div>
+          <pre><code><span class="hl-comment"># Clone and install</span>
+<span class="hl-keyword">git</span> clone https://github.com/smouj/kimari-microcompress.git
+<span class="hl-keyword">cd</span> kimari-microcompress
+pip install -e <span class="hl-string">".[all]"</span>
+
+<span class="hl-comment"># Or with optional dependencies</span>
+pip install -e <span class="hl-string">".[safetensors]"</span>  <span class="hl-comment"># Enhanced safetensors parsing</span>
+pip install -e <span class="hl-string">".[zipnn]"</span>         <span class="hl-comment"># ZipNN benchmark comparison</span></code></pre>
+        </div>
+        <div class="code-block">
+          <div class="code-block-header">
+            <span class="code-block-title">Basic Usage</span>
+            <button class="code-block-copy" onclick="copyCode(this)">Copy</button>
+          </div>
+          <pre><code><span class="hl-comment"># Pack a model directory</span>
+<span class="hl-keyword">kmc</span> pack ./my-model ./my-model.kmc
+
+<span class="hl-comment"># Pack with tensor-aware mode</span>
+<span class="hl-keyword">kmc</span> pack ./my-model ./my-model.kmc <span class="hl-flag">--tensor-aware</span>
+
+<span class="hl-comment"># Verify integrity</span>
+<span class="hl-keyword">kmc</span> verify ./my-model.kmc
+
+<span class="hl-comment"># Unpack archive</span>
+<span class="hl-keyword">kmc</span> unpack ./my-model.kmc ./restored-model/</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================
+       API Section
+       ============================================ -->
+  <section class="api-section" id="api">
+    <div class="container">
+      <div class="section-label">&#128187; Python API</div>
+      <h2 class="section-title">KMCReader &mdash; Partial Access API</h2>
+      <p class="section-description">Read individual files or tensors without decompressing the entire archive.</p>
+      <div class="api-content">
+        <div class="code-block api-code">
+          <div class="code-block-header">
+            <span class="code-block-title">KMCReader Example</span>
+            <button class="code-block-copy" onclick="copyCode(this)">Copy</button>
+          </div>
+          <pre><code><span class="hl-keyword">from</span> kmc.reader <span class="hl-keyword">import</span> KMCReader
+
+<span class="hl-keyword">with</span> KMCReader(<span class="hl-string">"model.kmc"</span>) <span class="hl-keyword">as</span> reader:
+    <span class="hl-comment"># List available files and tensors</span>
+    files = reader.list_files()
+    tensors = reader.list_tensors()
+
+    <span class="hl-comment"># Read a single file (only needed blocks decompressed)</span>
+    config = reader.read_file(<span class="hl-string">"config.json"</span>)
+
+    <span class="hl-comment"># Read a specific tensor by name</span>
+    weight_bytes = reader.read_tensor(<span class="hl-string">"model.layers.0.mlp.down_proj.weight"</span>)
+
+    <span class="hl-comment"># Extract a file to disk</span>
+    reader.extract_file(<span class="hl-string">"config.json"</span>, <span class="hl-string">"./output/"</span>)
+
+    <span class="hl-comment"># Extract a tensor to disk</span>
+    reader.extract_tensor(<span class="hl-string">"model.layers.0.mlp.down_proj.weight"</span>, <span class="hl-string">"./output/"</span>)
+
+    <span class="hl-comment"># Get file/tensor metadata</span>
+    file_info = reader.get_file_info(<span class="hl-string">"config.json"</span>)
+    tensor_info = reader.get_tensor_info(<span class="hl-string">"model.layers.0.mlp.down_proj.weight"</span>)</code></pre>
+        </div>
+        <div class="api-note">
+          <strong>Tip:</strong> KMCReader builds block, file, and tensor indexes on open, enabling efficient partial reads. Only the blocks needed for a requested file or tensor are read and decompressed.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================
+       CLI Section
+       ============================================ -->
+  <section class="cli-section" id="cli">
+    <div class="container">
+      <div class="section-label">&#9000; CLI Reference</div>
+      <h2 class="section-title">Command-Line Interface</h2>
+      <p class="section-description">All major commands and flags at a glance.</p>
+      <div class="cli-content">
+        <div class="code-block">
+          <div class="code-block-header">
+            <span class="code-block-title">Common Commands</span>
+            <button class="code-block-copy" onclick="copyCode(this)">Copy</button>
+          </div>
+          <pre><code><span class="hl-comment"># Core commands</span>
+<span class="hl-keyword">kmc</span> pack SOURCE OUTPUT               <span class="hl-comment"># Compress files/dirs into .kmc</span>
+<span class="hl-keyword">kmc</span> pack-lora SOURCE OUTPUT          <span class="hl-comment"># Compress LoRA adapter</span>
+<span class="hl-keyword">kmc</span> pack-checkpoint SOURCE OUTPUT    <span class="hl-comment"># Compress training checkpoint</span>
+<span class="hl-keyword">kmc</span> unpack ARCHIVE OUTPUT            <span class="hl-comment"># Decompress .kmc archive</span>
+<span class="hl-keyword">kmc</span> verify ARCHIVE                   <span class="hl-comment"># Full integrity verification</span>
+<span class="hl-keyword">kmc</span> inspect TARGET                   <span class="hl-comment"># Inspect archive or model</span>
+<span class="hl-keyword">kmc</span> bench SOURCE OUTPUT              <span class="hl-comment"># Benchmark compression</span>
+
+<span class="hl-comment"># Selective extraction</span>
+<span class="hl-keyword">kmc</span> unpack archive.kmc ./out <span class="hl-flag">--only</span> <span class="hl-string">"*.safetensors"</span>
+<span class="hl-keyword">kmc</span> unpack archive.kmc ./out <span class="hl-flag">--tensor</span> <span class="hl-string">"model.layer.0.weight"</span>
+
+<span class="hl-comment"># Inspect with flags</span>
+<span class="hl-keyword">kmc</span> inspect ./model/ <span class="hl-flag">--tensors</span>        <span class="hl-comment"># Show tensor details</span>
+<span class="hl-keyword">kmc</span> inspect ./model/ <span class="hl-flag">--lora</span>           <span class="hl-comment"># LoRA inspection</span>
+<span class="hl-keyword">kmc</span> inspect ./model/ <span class="hl-flag">--checkpoint</span>     <span class="hl-comment"># Checkpoint inspection</span>
+<span class="hl-keyword">kmc</span> inspect model.gguf <span class="hl-flag">--gguf</span>        <span class="hl-comment"># GGUF inspection</span>
+<span class="hl-keyword">kmc</span> inspect archive.kmc <span class="hl-flag">--compression</span>  <span class="hl-comment"># Compression summary</span></code></pre>
+        </div>
+        <div class="cli-table-wrap">
+          <table class="cli-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Command</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--tensor-aware</code></td>
+                <td>pack</td>
+                <td>Align blocks to tensor boundaries for safetensors files</td>
+              </tr>
+              <tr>
+                <td><code>--gguf-aware</code></td>
+                <td>pack</td>
+                <td>Adjust codec selection for quantized GGUF tensors</td>
+              </tr>
+              <tr>
+                <td><code>--codec</code></td>
+                <td>pack, bench</td>
+                <td>Codec: auto, byteplane, floatplane, zstd, zlib, raw</td>
+              </tr>
+              <tr>
+                <td><code>--jobs N</code></td>
+                <td>pack</td>
+                <td>Parallel compression with N workers</td>
+              </tr>
+              <tr>
+                <td><code>--only</code></td>
+                <td>unpack</td>
+                <td>Selective file extraction by glob pattern</td>
+              </tr>
+              <tr>
+                <td><code>--tensor</code></td>
+                <td>unpack</td>
+                <td>Selective tensor extraction by name</td>
+              </tr>
+              <tr>
+                <td><code>--tensors</code></td>
+                <td>inspect</td>
+                <td>Show detailed tensor information</td>
+              </tr>
+              <tr>
+                <td><code>--compression</code></td>
+                <td>inspect</td>
+                <td>Show compression summary with codec usage</td>
+              </tr>
+              <tr>
+                <td><code>--json</code></td>
+                <td>inspect, bench</td>
+                <td>Output as JSON for scripting</td>
+              </tr>
+              <tr>
+                <td><code>--compare-codecs</code></td>
+                <td>bench</td>
+                <td>Compare all available codecs</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================
+       Warnings Section
+       ============================================ -->
+  <section class="warnings-section" id="warnings">
+    <div class="container">
+      <div class="section-label">&#9888;&#65039; Important Limitations</div>
+      <h2 class="section-title">Please Read Before Using</h2>
+      <p class="section-description">KMC is a storage and transfer tool. Understanding these limitations is critical.</p>
+      <div class="warnings-grid">
+        <div class="warning-card">
+          <div class="warning-icon">&#128683;</div>
+          <div>
+            <h4>Not Compressed Inference</h4>
+            <p>KMC does NOT perform compressed inference. It cannot reduce VRAM during model execution. It is designed for storage, transfer, and verification only.</p>
+          </div>
+        </div>
+        <div class="warning-card">
+          <div class="warning-icon">&#128172;</div>
+          <div>
+            <h4>No VRAM Reduction Claims</h4>
+            <p>Do not use KMC as a replacement for quantization. If you need smaller models for inference, use quantization (GGUF Q4_K, GPTQ, AWQ, etc.) instead.</p>
+          </div>
+        </div>
+        <div class="warning-card">
+          <div class="warning-icon">&#128274;</div>
+          <div>
+            <h4>Lossless Only &mdash; No Weight Modification</h4>
+            <p>Compression is lossless and reversible. Every byte is preserved exactly. There is no lossy mode and no weight modification of any kind.</p>
+          </div>
+        </div>
+        <div class="warning-card">
+          <div class="warning-icon">&#128577;</div>
+          <div>
+            <h4>No Pickle Used Anywhere</h4>
+            <p>KMC never deserializes pickle-based files. Only presence, size, and hash are recorded. No arbitrary code execution risk from pickle.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================
+       Links Section
+       ============================================ -->
+  <section class="links-section" id="links">
+    <div class="container">
+      <div class="section-label">&#128279; Resources</div>
+      <h2 class="section-title">Explore More</h2>
+      <p class="section-description">Dive deeper into the project with these resources.</p>
+      <div class="links-grid">
+        <a href="https://github.com/smouj/kimari-microcompress" class="link-card" target="_blank" rel="noopener">
+          <div class="link-icon">&#128187;</div>
+          <h3>GitHub Repository</h3>
+          <p>Source code, issues, and contributions</p>
+          <span class="link-arrow">View on GitHub &rarr;</span>
+        </a>
+        <a href="https://github.com/smouj/kimari-microcompress/tree/main/docs" class="link-card" target="_blank" rel="noopener">
+          <div class="link-icon">&#128214;</div>
+          <h3>Documentation</h3>
+          <p>Architecture, format spec, security model, and more</p>
+          <span class="link-arrow">Read the docs &rarr;</span>
+        </a>
+        <a href="https://pypi.org/project/kimari-microcompress/" class="link-card" target="_blank" rel="noopener">
+          <div class="link-icon">&#128230;</div>
+          <h3>PyPI Package</h3>
+          <p>Install via pip, view release history</p>
+          <span class="link-arrow">View on PyPI &rarr;</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================
+       Footer
+       ============================================ -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <div class="footer-logo">K</div>
+          <span>KimariDB</span>
+        </div>
+        <div class="footer-copy">
+          &copy; 2024 KimariDB. All rights reserved.
+        </div>
+        <div class="footer-license">
+          Licensed under the <a href="https://opensource.org/licenses/MIT" target="_blank" rel="noopener">MIT License</a>.
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ============================================
+       JavaScript
+       ============================================ -->
+  <script>
+    // ---- Theme Toggle ----
+    (function() {
+      const KEY = 'kmc-theme';
+      const toggle = document.getElementById('themeToggle');
+      const icon = document.getElementById('themeIcon');
+      const root = document.documentElement;
+
+      function getPreferred() {
+        const stored = localStorage.getItem(KEY);
+        if (stored) return stored;
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+
+      function apply(theme) {
+        root.setAttribute('data-theme', theme);
+        icon.textContent = theme === 'dark' ? '\u263E' : '\u2600';
+        localStorage.setItem(KEY, theme);
+      }
+
+      apply(getPreferred());
+
+      toggle.addEventListener('click', function() {
+        const current = root.getAttribute('data-theme');
+        apply(current === 'dark' ? 'light' : 'dark');
+      });
+    })();
+
+    // ---- Mobile Menu ----
+    (function() {
+      const btn = document.getElementById('mobileMenuBtn');
+      const links = document.getElementById('navLinks');
+      btn.addEventListener('click', function() {
+        links.classList.toggle('open');
+      });
+      // Close on link click
+      links.querySelectorAll('a').forEach(function(a) {
+        a.addEventListener('click', function() {
+          links.classList.remove('open');
+        });
+      });
+    })();
+
+    // ---- Copy Code ----
+    function copyCode(button) {
+      var pre = button.closest('.code-block').querySelector('pre');
+      var text = pre.textContent;
+      navigator.clipboard.writeText(text).then(function() {
+        var orig = button.textContent;
+        button.textContent = 'Copied!';
+        setTimeout(function() {
+          button.textContent = orig;
+        }, 2000);
+      });
+    }
+
+    // ---- Smooth scroll for anchor links ----
+    document.querySelectorAll('a[href^="#"]').forEach(function(anchor) {
+      anchor.addEventListener('click', function(e) {
+        var target = document.querySelector(this.getAttribute('href'));
+        if (target) {
+          e.preventDefault();
+          target.scrollIntoView({ behavior: 'smooth' });
+        }
+      });
+    });
+  </script>
+</body>
+</html>

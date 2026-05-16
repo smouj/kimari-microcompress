@@ -497,8 +497,8 @@ class TestManifestCompatibility:
         assert restored.files[0].blocks[0].tensor_dtype == "BF16"
 
     def test_current_manifest_version(self):
-        """Current manifest should be v5."""
-        assert KMC_MANIFEST_VERSION == 5
+        """Current manifest should be v6."""
+        assert KMC_MANIFEST_VERSION == 6
 
 
 # ===========================================================================
