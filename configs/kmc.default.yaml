@@ -1,0 +1,48 @@
+# KMC Default Configuration
+# This file defines default values for all KMC operations.
+
+# Compression settings
+compression:
+  # Default codec: "auto" selects zstd if available, zlib otherwise
+  codec: auto
+  # Default compression level (codec-dependent)
+  level: 3
+  # Block size in bytes (256 KiB default)
+  block_size: 262144
+
+# Archive settings
+archive:
+  # Include creation timestamp in manifest
+  timestamp: true
+  # Include tool version in manifest
+  tool_info: true
+
+# Verification settings
+verification:
+  # Verify block hashes during unpack
+  verify_on_unpack: true
+  # Verify file hashes after unpack
+  verify_file_hash: true
+
+# Benchmark settings
+benchmark:
+  # Number of warmup iterations
+  warmup: 1
+  # Number of measured iterations
+  iterations: 3
+
+# Security settings
+security:
+  # Maximum manifest size in bytes (100 MB)
+  max_manifest_size: 104857600
+  # Maximum total decompressed size (10 GB)
+  max_decompressed_size: 10737418240
+  # Reject path traversal in unpack
+  reject_path_traversal: true
+
+# Logging
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+  # Show progress bars
+  progress: true
