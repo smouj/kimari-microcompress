@@ -9,7 +9,7 @@
 5. Never invent or fabricate benchmark results.
 6. Clearly distinguish between synthetic and real data benchmarks.
 
-## KMC v0.4.0-alpha Benchmark Capabilities
+## KMC v0.5.0-alpha Benchmark Capabilities
 
 ### Core Benchmarking
 
@@ -48,6 +48,63 @@ kmc bench ./model ./model-bench.kmc --compare-codecs --json --output codec-compa
 When `--compare-codecs` is used, the benchmark tests each available codec (`auto`, `byteplane`, `floatplane`, `zstd`, `zlib`, `raw`) on the same input and reports compressed size, ratio, and timing for each.
 
 **No claims of superiority are made.** The results are measurements, not marketing. Different models and dtypes may favor different codecs.
+
+### GGUF-Aware Benchmarks (v0.5+)
+
+The `--gguf-aware` flag on `kmc pack` adjusts codec selection for quantized GGUF tensors:
+
+```bash
+# Pack a GGUF file with GGUF-aware mode
+kmc pack ./model.gguf ./model.kmc --gguf-aware
+
+# Compare with non-GGUF-aware mode
+kmc pack ./model.gguf ./model-default.kmc
+
+# Compare sizes and compression summary
+kmc inspect ./model.kmc --compression
+kmc inspect ./model-default.kmc --compression
+```
+
+For benchmarking, compare the GGUF-aware and non-GGUF-aware results on the same GGUF file:
+
+```bash
+# Benchmark with default mode
+kmc bench ./model.gguf ./bench-default.kmc --json --output gguf-default.json
+
+# Manually pack with GGUF-aware mode and measure
+time kmc pack ./model.gguf ./bench-gguf-aware.kmc --gguf-aware
+ls -la ./bench-default.kmc ./bench-gguf-aware.kmc
+```
+
+### LoRA Adapter Benchmarks (v0.5+)
+
+Use `kmc pack-lora` for dedicated LoRA adapter benchmarking:
+
+```bash
+# Pack a LoRA adapter
+kmc pack-lora ./lora-adapter ./lora-adapter.kmc
+
+# Compare with standard pack
+kmc pack ./lora-adapter ./lora-standard.kmc --tensor-aware
+
+# Compare sizes
+ls -la ./lora-adapter.kmc ./lora-standard.kmc
+```
+
+### Checkpoint Benchmarks (v0.5+)
+
+Use `kmc pack-checkpoint` for dedicated checkpoint benchmarking:
+
+```bash
+# Pack a training checkpoint
+kmc pack-checkpoint ./checkpoint-1000 ./checkpoint-1000.kmc
+
+# Compare with standard pack
+kmc pack ./checkpoint-1000 ./checkpoint-standard.kmc --tensor-aware
+
+# Compare sizes
+ls -la ./checkpoint-1000.kmc ./checkpoint-standard.kmc
+```
 
 ### Synthetic Tensor Fixtures (v0.4+)
 
@@ -94,7 +151,7 @@ All benchmark results include environment information for reproducibility:
     "os_version": "6.1.0",
     "cpu": "AMD Ryzen 9 7950X",
     "ram_gb": 64.0,
-    "kmc_version": "0.4.0-alpha",
+    "kmc_version": "0.5.0-alpha",
     "zipnn_version": "0.3.0",
     "zstd_available": true
   }
@@ -109,8 +166,30 @@ All benchmark results include environment information for reproducibility:
 |-------|--------|------|-------|
 | GPT-2 (124M) | safetensors | ~500 MB | Widely available, good baseline |
 | DistilGPT-2 | safetensors | ~350 MB | Smaller variant |
-| Small LLaMA (1.1B) | GGUF (Q4_0) | ~600 MB | Quantized format baseline |
 | BERT-base | safetensors | ~440 MB | Encoder model variety |
+
+### GGUF Models (v0.5+)
+
+| Model | Format | Size | Notes |
+|-------|--------|------|-------|
+| LLaMA-2 7B (Q4_K_M) | GGUF | ~4 GB | Popular quantized model |
+| Mistral-7B (Q5_0) | GGUF | ~5 GB | Mistral quantized variant |
+| LLaMA-2 7B (Q8_0) | GGUF | ~7 GB | Less aggressive quantization |
+| Small LLaMA (1.1B, Q4_0) | GGUF | ~600 MB | Smaller GGUF baseline |
+
+### LoRA Adapters (v0.5+)
+
+| Model | Format | Size | Notes |
+|-------|--------|------|-------|
+| LoRA for LLaMA-7B | safetensors | ~50-200 MB | Small, potentially compressible |
+| QLoRA adapters | safetensors | ~100-500 MB | Quantized adapters |
+
+### Training Checkpoints (v0.5+)
+
+| Model | Format | Size | Notes |
+|-------|--------|------|-------|
+| GPT-2 checkpoint (step 1000) | Mixed | ~1.5 GB | Includes optimizer state |
+| BERT-base checkpoint | Mixed | ~1.2 GB | Includes optimizer state |
 
 ### Medium Models (1-10 GB)
 
@@ -119,13 +198,6 @@ All benchmark results include environment information for reproducibility:
 | LLaMA-2 7B | safetensors | ~13 GB | Popular open model |
 | Mistral-7B | safetensors | ~14 GB | Efficient architecture |
 | LLaMA-2 7B (Q4_K_M) | GGUF | ~4 GB | Quantized comparison |
-
-### LoRA Adapters
-
-| Model | Format | Size | Notes |
-|-------|--------|------|-------|
-| LoRA for LLaMA-7B | safetensors | ~50-200 MB | Small, potentially compressible |
-| QLoRA adapters | safetensors | ~100-500 MB | Quantized adapters |
 
 ## Metrics
 
@@ -169,6 +241,10 @@ kmc pack ./model ./model-l9.kmc -l 9
 kmc pack ./model ./model.kmc --codec auto --tensor-aware
 kmc pack ./model ./model-bp.kmc --codec byteplane --tensor-aware
 kmc pack ./model ./model-fp.kmc --codec floatplane --tensor-aware
+
+# Pack with GGUF-aware mode (for GGUF files)
+kmc pack ./model.gguf ./model.kmc --gguf-aware
+kmc pack ./model.gguf ./model.kmc --gguf-aware --tensor-aware
 ```
 
 ### 3. Pack with Baseline Tools
@@ -196,7 +272,19 @@ kmc bench ./model ./model-bench.kmc --compare-codecs --json --output codec-compa
 python scripts/bench_small_hf_model.py ./model
 ```
 
-### 6. Verify and Unpack
+### 6. Artifact-Specific Benchmarks (v0.5+)
+
+```bash
+# LoRA adapter
+kmc pack-lora ./lora-adapter ./lora.kmc
+kmc verify ./lora.kmc
+
+# Training checkpoint
+kmc pack-checkpoint ./checkpoint-1000 ./checkpoint.kmc
+kmc verify ./checkpoint.kmc
+```
+
+### 7. Verify and Unpack
 
 ```bash
 kmc verify ./model.kmc
@@ -204,7 +292,7 @@ kmc unpack ./model.kmc ./restored/
 diff -r ./model ./restored/
 ```
 
-### 7. Record Results
+### 8. Record Results
 
 For each combination of model, tool, codec, and compression level, record:
 - Original size
@@ -215,8 +303,9 @@ For each combination of model, tool, codec, and compression level, record:
 - Verify time
 - Peak memory usage
 - Environment metadata
+- Artifact type (if applicable)
 
-### 8. Compare
+### 9. Compare
 
 Generate comparison tables and charts showing KMC vs. baselines vs. ZipNN.
 
@@ -225,8 +314,9 @@ Generate comparison tables and charts showing KMC vs. baselines vs. ZipNN.
 Based on ZipNN's published results and the nature of AI model weights:
 
 - **safetensors**: Expected 30-50% compression ratio, similar to ZipNN. The uniform float32/float16 data may benefit from zstd's dictionary mode across blocks. BytePlane and FloatPlane codecs may improve on this for FP16/BF16 tensors.
-- **GGUF (quantized)**: Expected 5-15% compression, since quantized data is already compact. Some metadata and vocabulary sections may compress well. Tensor-aware codecs are not expected to help here.
+- **GGUF (quantized)**: Expected 5-15% compression, since quantized data is already compact. Some metadata and vocabulary sections may compress well. GGUF-aware mode may improve ratios by avoiding float-aware transforms on quantized data. Tensor-aware codecs are not expected to help here.
 - **LoRA adapters**: Expected 40-60% compression, as low-rank matrices have significant structure.
+- **Training checkpoints**: Expected 30-50% compression for model weights; optimizer states may compress differently depending on their structure.
 - **PyTorch .bin**: Expected 30-50%, similar to safetensors, but with additional pickle overhead that may not compress as well.
 
 **These are expectations, not guarantees.** Actual results will be published once real benchmarks are completed.
@@ -253,7 +343,7 @@ When comparing with ZipNN:
 - Use the same input data and compression level where possible.
 - Report both tools' versions.
 - Report the full environment (CPU, RAM, OS).
-- Acknowledge when ZipNN performs better — this is a measurement, not a competition.
+- Acknowledge when ZipNN performs better -- this is a measurement, not a competition.
 - Note that KMC and ZipNN may optimize for different things (KMC for block-level access, ZipNN for maximum ratio).
 
 ### Synthetic Data Warning
@@ -273,7 +363,7 @@ When comparing codecs (via `--compare-codecs` or `bench_small_hf_model.py`), the
 3. **Roundtrip verified**: Each codec must pass roundtrip verification (decompress matches original) to be included in results.
 4. **Metrics reported**: Compressed size, compression ratio, pack time, throughput.
 5. **Actual codecs used**: For `auto` mode, the report shows which codec was actually selected for each block.
-6. **No invented numbers**: If a codec fails or is unavailable, it is marked as such — no placeholder numbers are used.
+6. **No invented numbers**: If a codec fails or is unavailable, it is marked as such -- no placeholder numbers are used.
 7. **Environment metadata**: All results include Python version, OS, CPU, RAM, and dependency versions for reproducibility.
 
 ### Interpreting Codec Comparison Results
@@ -282,3 +372,13 @@ When comparing codecs (via `--compare-codecs` or `bench_small_hf_model.py`), the
 - **`byteplane`** and **`floatplane`** apply a transformation before compression. For already-compressed or non-floating-point data, these may produce larger output than raw zstd.
 - **`raw`** is a passthrough that stores data uncompressed. It serves as a baseline.
 - Results are **specific to the model and hardware** and should not be generalized without additional testing.
+
+### GGUF-Aware Benchmark Methodology (v0.5+)
+
+When comparing GGUF-aware vs. non-GGUF-aware compression:
+
+1. **Same GGUF file**: Both modes compress the exact same source file.
+2. **Same block size and level**: All other parameters are identical.
+3. **Report quantization summary**: Include the quantization breakdown (e.g., Q4_K: 199, F32: 1) so readers can understand the model composition.
+4. **Per-block codec comparison**: Show which codec was selected for each type of tensor (quantized vs. floating-point).
+5. **GGUF-aware mode should not worsen results**: On files that are not GGUF, `--gguf-aware` should have no effect.

@@ -31,6 +31,20 @@ These small models are ideal for quick benchmarking:
 | `bert-base-uncased` | ~440 MB | FP32 | Encoder model variety |
 | `google/flan-t5-small` | ~300 MB | FP32 | Encoder-decoder model |
 
+For GGUF benchmarks (v0.5+):
+
+| Model | Size | Quantization | Notes |
+|-------|------|-------------|-------|
+| `TheBloke/Llama-2-7B-Chat-GGUF` (Q4_K_M) | ~4 GB | Q4_K_M | Popular quantized model |
+| `TheBloke/Mistral-7B-Instruct-v0.2-GGUF` (Q5_0) | ~5 GB | Q5_0 | Mistral quantized variant |
+
+For LoRA adapter benchmarks (v0.5+):
+
+| Model | Size | Notes |
+|-------|------|-------|
+| `winddude/wizardLM-7B-uncensored-lora` | ~50-200 MB | LoRA adapter for LLaMA |
+| Any PEFT adapter from HuggingFace | Varies | Use `kmc pack-lora` for best results |
+
 > **Tip:** Start with `sshleifer/tiny-gpt2` for a quick smoke test (~5 MB), then move to `gpt2` for realistic results.
 
 ## Running the Benchmark
@@ -59,9 +73,40 @@ python scripts/bench_small_hf_model.py ./models/gpt2 --output-dir ./bench-result
 
 The script outputs:
 
-1. **Console table** — A markdown-formatted comparison table printed to stdout.
-2. **JSON file** — Detailed results saved to `benchmark_results.json` in the output directory.
-3. **Per-codec verification** — Each archive is verified after compression to confirm byte-exact roundtrip.
+1. **Console table** -- A markdown-formatted comparison table printed to stdout.
+2. **JSON file** -- Detailed results saved to `benchmark_results.json` in the output directory.
+3. **Per-codec verification** -- Each archive is verified after compression to confirm byte-exact roundtrip.
+
+## Benchmarking LoRA Adapters (v0.5+)
+
+```bash
+# Download a LoRA adapter
+huggingface-cli download winddude/wizardLM-7B-uncensored-lora --local-dir ./lora-adapter
+
+# Benchmark with standard pack
+python scripts/bench_small_hf_model.py ./lora-adapter
+
+# Or use pack-lora for dedicated workflow
+kmc pack-lora ./lora-adapter ./lora-adapter.kmc
+kmc verify ./lora-adapter.kmc
+```
+
+## Benchmarking GGUF Files (v0.5+)
+
+```bash
+# Download a GGUF file (manual download from HuggingFace)
+# Then benchmark with GGUF-aware mode
+kmc pack ./model.gguf ./model.kmc --gguf-aware
+kmc verify ./model.kmc
+kmc inspect ./model.kmc --compression
+
+# Compare with non-GGUF-aware mode
+kmc pack ./model.gguf ./model-default.kmc
+kmc inspect ./model-default.kmc --compression
+
+# Compare sizes
+ls -la ./model.kmc ./model-default.kmc
+```
 
 ## Expected Output
 
@@ -132,7 +177,7 @@ The JSON file includes:
 
 ### Codec Explanations
 
-- **`auto`**: Uses the automatic codec selector. For FP32/FP16/BF16 tensors, it tries `floatplane → byteplane → zstd → zlib → raw` in order and picks the smallest verified result per block. The "Actual Codecs" column shows which codecs were actually selected.
+- **`auto`**: Uses the automatic codec selector. For FP32/FP16/BF16 tensors, it tries `floatplane -> byteplane -> zstd -> zlib -> raw` in order and picks the smallest verified result per block. The "Actual Codecs" column shows which codecs were actually selected.
 - **`zstd`**: Pure zstd compression without any tensor-aware transformation. Fast and effective for general data.
 - **`zlib`**: Pure zlib compression. Slightly worse ratio than zstd but always available (built-in).
 - **`byteplane`**: Byte-plane separation + zstd. Reorganizes bytes by their position within each element before compressing.
@@ -151,7 +196,15 @@ The JSON file includes:
 
 ### Actual Codecs Used
 
-In `auto` mode, the "Actual Codecs" column shows which codecs were selected per block. A model directory typically contains non-tensor files (JSON configs, tokenizer files) that are not floating-point data — these will use zstd or zlib, not BytePlane or FloatPlane.
+In `auto` mode, the "Actual Codecs" column shows which codecs were selected per block. A model directory typically contains non-tensor files (JSON configs, tokenizer files) that are not floating-point data -- these will use zstd or zlib, not BytePlane or FloatPlane.
+
+### GGUF-Aware Results (v0.5+)
+
+When benchmarking GGUF files with `--gguf-aware`, the results will show:
+
+- Quantized tensor blocks (Q4_K, Q5_0, etc.) use `zstd` or `zlib` only.
+- Floating-point tensor blocks (F32, F16, BF16) may use `floatplane` or `byteplane`.
+- The `auto` codec selector automatically adjusts its strategy based on the GGML type of each tensor.
 
 ## Disclaimers
 
@@ -164,6 +217,8 @@ In `auto` mode, the "Actual Codecs" column shows which codecs were selected per 
 4. **This is a measurement, not a claim of superiority.** If BytePlane or FloatPlane produces larger output than plain zstd for a particular model, that is a valid result. The `auto` selector handles this by choosing the smallest verified result.
 
 5. **No invented benchmark numbers.** If a codec fails or is unavailable, the result will show an error message rather than a fabricated number.
+
+6. **No fabricated benchmarks.** KMC does not invent, fabricate, or estimate benchmark results. All numbers come from actual measurements.
 
 ## Integration with CI
 
@@ -186,7 +241,9 @@ print('All codecs verified OK')
 
 ## Related Documentation
 
-- [Benchmark Plan](BENCHMARK_PLAN.md) — Full benchmark strategy and methodology
-- [Architecture](ARCHITECTURE.md) — Codec architecture and design decisions
-- [Research Notes](RESEARCH_NOTES.md) — BytePlane and FloatPlane design rationale
-- [Hugging Face Workflow](HUGGINGFACE_WORKFLOW.md) — General HuggingFace model workflow
+- [Benchmark Plan](BENCHMARK_PLAN.md) -- Full benchmark strategy and methodology
+- [Architecture](ARCHITECTURE.md) -- Codec architecture and design decisions
+- [Research Notes](RESEARCH_NOTES.md) -- BytePlane and FloatPlane design rationale
+- [Hugging Face Workflow](HUGGINGFACE_WORKFLOW.md) -- General HuggingFace model workflow
+- [GGUF Support](GGUF_SUPPORT.md) -- GGUF parsing and `--gguf-aware` mode
+- [LoRA Workflow](LORA_WORKFLOW.md) -- LoRA adapter compression and inspection

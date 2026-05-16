@@ -230,7 +230,10 @@ class TestInspectJSON:
         parsed = json.loads(output)
         assert "path" in parsed
         assert "files" in parsed
-        assert parsed["type"] in ("model_directory", "model_file")
+        assert (
+            parsed.get("type") in ("model_directory", "model_file")
+            or parsed.get("artifact_type") is not None
+        )
 
     def test_inspect_archive_json_output(self, tmp_path: Path):
         """kmc inspect --json produces valid JSON for a .kmc archive."""
@@ -346,7 +349,7 @@ class TestBenchmarkZipNNAbsent:
 
         assert result.environment is not None
         assert result.environment.python_version != ""
-        assert result.environment.kmc_version == "0.4.0-alpha"
+        assert result.environment.kmc_version == "0.5.0-alpha"
 
     def test_benchmark_tensor_aware_flag(self, tmp_path: Path):
         """Benchmark with tensor_aware flag."""

@@ -1,6 +1,6 @@
 # KMC Format Specification
 
-**Version:** 3  
+**Version:** 4
 **Status:** Experimental
 
 ## Overview
@@ -10,17 +10,17 @@ The `.kmc` format is a block-oriented archive format designed for reversible, ve
 ## File Layout
 
 ```
-┌──────────────────────────────────────────────┐
-│ Header                                        │
-│   Magic: "KMC\x00\x01\x00\x00\x00"  (8 B)   │
-│   Manifest length: uint64 BE         (8 B)   │
-├──────────────────────────────────────────────┤
-│ Manifest                                      │
-│   JSON document (UTF-8 encoded)     (variable)│
-├──────────────────────────────────────────────┤
-│ Block Data                                    │
-│   Concatenated compressed blocks    (variable)│
-└──────────────────────────────────────────────┘
++----------------------------------------------+
+| Header                                        |
+|   Magic: "KMC\x00\x01\x00\x00\x00"  (8 B)   |
+|   Manifest length: uint64 BE         (8 B)   |
++----------------------------------------------+
+| Manifest                                      |
+|   JSON document (UTF-8 encoded)     (variable)|
++----------------------------------------------+
+| Block Data                                    |
+|   Concatenated compressed blocks    (variable)|
++----------------------------------------------+
 ```
 
 All multi-byte integers are stored in **big-endian** byte order unless otherwise specified.
@@ -29,7 +29,7 @@ All multi-byte integers are stored in **big-endian** byte order unless otherwise
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0 | 8 | Magic | `KMC\x00\x01\x00\x00\x00` — identifies the file as KMC format version 1 |
+| 0 | 8 | Magic | `KMC\x00\x01\x00\x00\x00` -- identifies the file as KMC format version 1 |
 | 8 | 8 | Manifest Length | Length of the JSON manifest in bytes (uint64, big-endian) |
 
 Total header size: **16 bytes**.
@@ -37,25 +37,28 @@ Total header size: **16 bytes**.
 ### Magic Number
 
 The magic number encodes both the format identifier and the format version:
-- Bytes 0-2: `"KMC"` — format identifier
-- Byte 3: `\x00` — separator
-- Bytes 4-5: `\x01\x00` — format version 1 (uint16 big-endian)
-- Bytes 6-7: `\x00\x00` — reserved for future use
+- Bytes 0-2: `"KMC"` -- format identifier
+- Byte 3: `\x00` -- separator
+- Bytes 4-5: `\x01\x00` -- format version 1 (uint16 big-endian)
+- Bytes 6-7: `\x00\x00` -- reserved for future use
 
 ## Manifest
 
-The manifest is a JSON document encoded in UTF-8. It describes all files, blocks, and compression parameters.
+The manifest is a JSON document encoded in UTF-8. It describes all files, blocks, compression parameters, and artifact metadata.
 
-### Manifest Schema (v3)
+### Manifest Schema (v4)
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "tool": "kimari-microcompress",
-  "tool_version": "0.4.0-alpha",
+  "tool_version": "0.5.0-alpha",
   "created_at": "2025-01-01T00:00:00+00:00",
   "total_original_size": 0,
   "total_compressed_size": 0,
+  "artifact_type": "huggingface_model",
+  "artifact_metadata": {},
+  "format_metadata": {},
   "files": [
     {
       "path": "model.safetensors",
@@ -98,9 +101,9 @@ The manifest is a JSON document encoded in UTF-8. It describes all files, blocks
 }
 ```
 
-### Manifest Schema (v1 — Legacy)
+### Manifest Schema (v1 -- Legacy)
 
-For reference, the original v1 manifest schema is shown below. V3 readers should handle v1 and v2 manifests gracefully by defaulting missing fields to empty/zero values.
+For reference, the original v1 manifest schema is shown below. V4 readers should handle v1, v2, and v3 manifests gracefully by defaulting missing fields to empty/zero values.
 
 ```json
 {
@@ -137,12 +140,15 @@ For reference, the original v1 manifest schema is shown below. V3 readers should
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `version` | integer | Format version (currently 3) |
+| `version` | integer | Format version (currently 4) |
 | `tool` | string | Tool name that created the archive |
 | `tool_version` | string | Version of the tool |
 | `created_at` | string | ISO 8601 timestamp of archive creation |
 | `total_original_size` | integer | Sum of all original file sizes in bytes |
 | `total_compressed_size` | integer | Sum of all compressed block sizes in bytes |
+| `artifact_type` | string | Artifact classification (v4, optional). One of: `"huggingface_model"`, `"gguf_model"`, `"lora_adapter"`, `"training_checkpoint"`, `"unknown"` |
+| `artifact_metadata` | object | Artifact-specific metadata (v4, optional). See artifact metadata schemas below. |
+| `format_metadata` | object | Format-specific metadata (v4, optional). See format metadata schemas below. |
 | `files` | array | List of file entries |
 
 #### File Entry
@@ -165,10 +171,72 @@ For reference, the original v1 manifest schema is shown below. V3 readers should
 | `original_size` | integer | Size of the original (uncompressed) block data in bytes |
 | `codec` | string | Codec used: `"zstd"`, `"zlib"`, `"raw"`, `"byteplane"`, or `"floatplane"` |
 | `hash` | string | SHA-256 hex digest of the compressed block data |
-| `codec_metadata` | object | Codec-specific parameters for decompression (v3, optional) |
-| `tensor_name` | string | Name of the tensor this block belongs to (v3, optional) |
-| `tensor_dtype` | string | Dtype of the tensor, e.g. `"BF16"`, `"FP16"`, `"FP32"` (v3, optional) |
-| `tensor_shape` | array | Shape of the tensor as list of integers (v3, optional) |
+| `codec_metadata` | object | Codec-specific parameters for decompression (v3+, optional) |
+| `tensor_name` | string | Name of the tensor this block belongs to (v3+, optional) |
+| `tensor_dtype` | string | Dtype of the tensor, e.g. `"BF16"`, `"FP16"`, `"FP32"` (v3+, optional) |
+| `tensor_shape` | array | Shape of the tensor as list of integers (v3+, optional) |
+
+### Artifact Metadata Schemas (v4)
+
+The `artifact_metadata` field carries artifact-specific information. The schema depends on the `artifact_type`.
+
+#### LoRA Adapter Metadata
+
+When `artifact_type` is `"lora_adapter"`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `artifact_type` | string | `"lora_adapter"` |
+| `base_model_name_or_path` | string | Base model reference from `adapter_config.json` (or `"unknown"`) |
+| `peft_type` | string | PEFT type from config (e.g., `"LORA"`, or `"unknown"`) |
+| `r` | integer | LoRA rank (if available from config or inferred from tensors) |
+| `target_modules` | array | Target module names from config (e.g., `["q_proj", "v_proj"]`) |
+
+#### Training Checkpoint Metadata
+
+When `artifact_type` is `"training_checkpoint"`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `artifact_type` | string | `"training_checkpoint"` |
+| `step` | integer | Training step number (inferred from directory name or global_step.json) |
+| `has_optimizer_state` | boolean | Whether optimizer.pt was detected |
+| `has_scheduler_state` | boolean | Whether scheduler.pt was detected |
+| `has_rng_state` | boolean | Whether rng_state.pth was detected |
+| `has_trainer_state` | boolean | Whether trainer_state.json was detected |
+
+#### GGUF Model Metadata
+
+When `artifact_type` is `"gguf_model"`, metadata is primarily in `format_metadata["gguf"]` (see below). The `artifact_metadata` field may be empty or absent.
+
+### Format Metadata Schemas (v4)
+
+The `format_metadata` field carries format-specific information parsed from the model files.
+
+#### GGUF Format Metadata
+
+When the archive contains GGUF files, `format_metadata["gguf"]` contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | integer | GGUF format version (1, 2, or 3) |
+| `endianness` | string | `"little"` or `"big"` |
+| `tensor_count` | integer | Number of tensors in the GGUF file |
+| `metadata_kv_count` | integer | Number of metadata key-value pairs |
+| `quantization_summary` | object | Dict mapping quantization type name to count (e.g., `{"Q4_K": 201, "F32": 1}`) |
+| `tensor_names` | array | List of tensor names (up to 100) |
+| `parse_warnings` | array | Warnings encountered during GGUF parsing (if any) |
+
+#### Safetensors Format Metadata
+
+When the archive contains safetensors files, `format_metadata["safetensors"]` contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_sharded` | boolean | Whether the model is sharded |
+| `shard_count` | integer | Number of shard files (if sharded) |
+| `tensor_count` | integer | Number of tensors in the safetensors file |
+| `dtypes` | array | List of dtype strings (e.g., `["F32", "BF16"]`) |
 
 ## Block Data
 
@@ -189,11 +257,17 @@ For each block, the best codec is chosen independently:
 4. Otherwise, compress with `zlib` (level 6 by default).
 5. If the compressed output is not smaller than the original, store the block raw (`"raw"` codec).
 
+When `--gguf-aware` mode is enabled and a GGUF file contains quantized tensors:
+- Blocks corresponding to quantized tensors skip floatplane and byteplane codecs.
+- Only `zstd -> zlib -> raw` are attempted for quantized tensor blocks.
+- Blocks corresponding to F32/F16/BF16 tensors use the normal candidate chain.
+
 This per-block codec selection ensures that:
 - Already-compressed or random data is not expanded.
 - Each block gets the most appropriate treatment.
 - The archive never exceeds the original data size by more than a negligible overhead.
 - Tensor-aware codecs (BytePlane, FloatPlane) are automatically selected when they produce better results.
+- Quantized GGUF tensors are not subjected to float-aware transforms that would not benefit them.
 
 ### `codec_metadata` Fields
 
@@ -227,7 +301,7 @@ Integrity is verified at two levels:
 - Each block's compressed data is hashed with SHA-256.
 - The hash is stored in the manifest's `blocks[].hash` field.
 - Verification reads the compressed block, computes its hash, and compares it to the manifest value.
-- This is fast and doesn't require decompression.
+- This is fast and does not require decompression.
 
 ### File Level
 - Each file's original (uncompressed) content is hashed with SHA-256.
@@ -247,9 +321,10 @@ Integrity is verified at two levels:
 
 The format version is encoded in the magic number (bytes 4-5) and repeated in the manifest's `version` field. Version history:
 
-- **v1** (KMC v0.1–v0.2): Basic file/block/codec/hash manifest.
+- **v1** (KMC v0.1-v0.2): Basic file/block/codec/hash manifest.
 - **v2** (KMC v0.3): Adds optional tensor-aware entries (TensorEntry) for safetensors files.
 - **v3** (KMC v0.4): Adds per-block `codec_metadata`, `tensor_name`, `tensor_dtype`, `tensor_shape` fields for tensor-aware codecs.
+- **v4** (KMC v0.5): Adds `artifact_type`, `artifact_metadata`, `format_metadata` fields for artifact-aware workflows.
 
 Future versions may add:
 - New codecs.
@@ -259,11 +334,13 @@ Future versions may add:
 
 ### Backward Compatibility
 
+- **v4 readers** can read v1, v2, and v3 manifests. Missing `artifact_type`, `artifact_metadata`, and `format_metadata` fields default to `"unknown"`, `{}`, and `{}` respectively.
 - **v3 readers** can read v1 and v2 manifests. Missing `codec_metadata`, `tensor_name`, `tensor_dtype`, and `tensor_shape` fields default to empty/zero values.
 - **v2 readers** can read v1 manifests. Missing tensor entries default to empty.
-- **v1 readers** should not encounter v2/v3 manifests in normal operation, but they can safely ignore unknown fields in JSON.
-- **v2/v3 readers encountering v1 manifests** will not have codec metadata available. They should use the legacy `compress_block`/`decompress_block` API for v1 blocks.
-- **`byteplane` and `floatplane` codecs require v3 manifests** because their decompression requires `codec_metadata` (transform type, element_size, inner_codec). The legacy `decompress_block` function raises a `ValueError` for these codecs, directing users to the new archive API.
+- **v1 readers** should not encounter v2/v3/v4 manifests in normal operation, but they can safely ignore unknown fields in JSON.
+- **v2/v3/v4 readers encountering v1 manifests** will not have codec metadata available. They should use the legacy `compress_block`/`decompress_block` API for v1 blocks.
+- **`byteplane` and `floatplane` codecs require v3+ manifests** because their decompression requires `codec_metadata` (transform type, element_size, inner_codec). The legacy `decompress_block` function raises a `ValueError` for these codecs, directing users to the new archive API.
+- **v4 `artifact_type` and `format_metadata` fields are ignored by v1/v2/v3 readers** because they are additional top-level fields that do not affect block decompression.
 
 Readers should check the magic number version and the manifest version for compatibility.
 
@@ -272,3 +349,4 @@ Readers should check the magic number version and the manifest version for compa
 - **Path traversal**: The unpack operation validates all paths against directory traversal attacks. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
 - **Denial of service**: Manifest length is bounded; readers should reject manifests larger than a reasonable limit (e.g., 100 MB).
 - **Data integrity**: SHA-256 hashes provide strong integrity guarantees against both accidental corruption and intentional tampering (though they do not provide authentication; see security model).
+- **No pickle deserialization**: KMC never deserializes pickle-based files. Pickle files in checkpoints (optimizer.pt, training_args.bin, etc.) are compressed as raw bytes only.

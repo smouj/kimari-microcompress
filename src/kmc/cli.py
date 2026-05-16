@@ -25,6 +25,7 @@ def cmd_pack(args: argparse.Namespace) -> None:
     level = args.level
     tensor_aware = getattr(args, "tensor_aware", False)
     codec = getattr(args, "codec", "auto")
+    gguf_aware = getattr(args, "gguf_aware", False)
 
     if not source.exists():
         print(f"Error: source not found: {source}", file=sys.stderr)
@@ -38,12 +39,21 @@ def cmd_pack(args: argparse.Namespace) -> None:
 
     mode_str = " (tensor-aware)" if tensor_aware else ""
     codec_str = f" --codec {codec}" if codec != "auto" else ""
+    gguf_str = " (gguf-aware)" if gguf_aware else ""
     print(
-        f"Packing {source} -> {output}{mode_str}{codec_str} "
+        f"Packing {source} -> {output}{mode_str}{codec_str}{gguf_str} "
         f"(block_size={block_size}, level={level})"
     )
     start = time.time()
-    pack(source, output, block_size=block_size, level=level, tensor_aware=tensor_aware, codec=codec)
+    pack(
+        source,
+        output,
+        block_size=block_size,
+        level=level,
+        tensor_aware=tensor_aware,
+        codec=codec,
+        gguf_aware=gguf_aware,
+    )
     elapsed = time.time() - start
 
     orig = (
@@ -51,6 +61,111 @@ def cmd_pack(args: argparse.Namespace) -> None:
         if source.is_file()
         else sum(f.stat().st_size for f in source.rglob("*") if f.is_file())
     )
+    comp = output.stat().st_size
+    ratio = comp / orig if orig > 0 else 0
+
+    print(f"Done in {elapsed:.2f}s — {orig:,} -> {comp:,} bytes (ratio: {ratio:.2%})")
+
+
+def cmd_pack_lora(args: argparse.Namespace) -> None:
+    """Pack a LoRA adapter directory into a .kmc archive."""
+    source = Path(args.source)
+    output = Path(args.output)
+    block_size = args.block_size or DEFAULT_BLOCK_SIZE
+    level = args.level
+    codec = getattr(args, "codec", "auto")
+
+    if not source.is_dir():
+        print(f"Error: source must be a directory: {source}", file=sys.stderr)
+        sys.exit(1)
+
+    from .workflows.lora import build_lora_manifest_metadata, detect_lora_adapter
+
+    adapter_info = detect_lora_adapter(source)
+    if not adapter_info.is_lora:
+        print(f"Error: not a LoRA adapter directory: {source}", file=sys.stderr)
+        sys.exit(1)
+
+    if adapter_info.warnings:
+        for w in adapter_info.warnings:
+            print(f"Warning: {w}", file=sys.stderr)
+
+    artifact_metadata = build_lora_manifest_metadata(adapter_info)
+    print(f"Packing LoRA adapter: {source} -> {output}")
+    print(f"  PEFT type: {adapter_info.peft_type}")
+    if adapter_info.lora_rank is not None:
+        print(f"  Rank: {adapter_info.lora_rank}")
+    if adapter_info.target_modules:
+        print(f"  Target modules: {', '.join(adapter_info.target_modules)}")
+    if adapter_info.base_model_name_or_path != "unknown":
+        print(f"  Base model: {adapter_info.base_model_name_or_path}")
+
+    start = time.time()
+    pack(
+        source,
+        output,
+        block_size=block_size,
+        level=level,
+        tensor_aware=True,
+        codec=codec,
+        artifact_type="lora_adapter",
+        artifact_metadata=artifact_metadata,
+    )
+    elapsed = time.time() - start
+
+    orig = sum(f.stat().st_size for f in source.rglob("*") if f.is_file())
+    comp = output.stat().st_size
+    ratio = comp / orig if orig > 0 else 0
+
+    print(f"Done in {elapsed:.2f}s — {orig:,} -> {comp:,} bytes (ratio: {ratio:.2%})")
+
+
+def cmd_pack_checkpoint(args: argparse.Namespace) -> None:
+    """Pack a training checkpoint directory into a .kmc archive."""
+    source = Path(args.source)
+    output = Path(args.output)
+    block_size = args.block_size or DEFAULT_BLOCK_SIZE
+    level = args.level
+    codec = getattr(args, "codec", "auto")
+
+    if not source.is_dir():
+        print(f"Error: source must be a directory: {source}", file=sys.stderr)
+        sys.exit(1)
+
+    from .workflows.checkpoint import build_checkpoint_manifest_metadata, detect_checkpoint
+
+    ckpt_info = detect_checkpoint(source)
+    if not ckpt_info.is_checkpoint:
+        print(f"Error: not a training checkpoint directory: {source}", file=sys.stderr)
+        sys.exit(1)
+
+    if ckpt_info.warnings:
+        for w in ckpt_info.warnings:
+            print(f"Warning: {w}", file=sys.stderr)
+
+    artifact_metadata = build_checkpoint_manifest_metadata(ckpt_info)
+    print(f"Packing training checkpoint: {source} -> {output}")
+    if ckpt_info.step is not None:
+        print(f"  Step: {ckpt_info.step}")
+    print(f"  Has optimizer state: {ckpt_info.has_optimizer_state}")
+    print(f"  Has trainer state: {ckpt_info.has_trainer_state}")
+    print(f"  Has safetensors model: {ckpt_info.has_safetensors_model}")
+
+    tensor_aware = ckpt_info.has_safetensors_model
+    start = time.time()
+    pack(
+        source,
+        output,
+        block_size=block_size,
+        level=level,
+        tensor_aware=tensor_aware,
+        codec=codec,
+        artifact_type="training_checkpoint",
+        artifact_metadata=artifact_metadata,
+    )
+    elapsed = time.time() - start
+
+    orig = sum(f.stat().st_size for f in source.rglob("*") if f.is_file())
     comp = output.stat().st_size
     ratio = comp / orig if orig > 0 else 0
 
@@ -101,6 +216,9 @@ def cmd_inspect(args: argparse.Namespace) -> None:
     show_tensors = getattr(args, "tensors", False)
     json_output = getattr(args, "json", False)
     show_compression = getattr(args, "compression", False)
+    show_lora = getattr(args, "lora", False)
+    show_checkpoint = getattr(args, "checkpoint", False)
+    show_gguf = getattr(args, "gguf", False)
 
     # If it's a .kmc archive, show archive manifest
     if target.is_file() and target.suffix.lower() == ".kmc":
@@ -111,7 +229,14 @@ def cmd_inspect(args: argparse.Namespace) -> None:
             show_compression=show_compression,
         )
     else:
-        _inspect_model(target, json_output=json_output, show_tensors=show_tensors)
+        _inspect_model(
+            target,
+            json_output=json_output,
+            show_tensors=show_tensors,
+            show_lora=show_lora,
+            show_checkpoint=show_checkpoint,
+            show_gguf=show_gguf,
+        )
 
 
 def _format_size(n: int) -> str:
@@ -142,6 +267,7 @@ def _inspect_archive(
             "tool": manifest.tool,
             "tool_version": manifest.tool_version,
             "created_at": manifest.created_at,
+            "artifact_type": manifest.artifact_type,
             "original_size": manifest.total_original_size,
             "compressed_size": manifest.total_compressed_size,
             "ratio": (
@@ -151,6 +277,10 @@ def _inspect_archive(
             ),
             "files": [],
         }
+        if manifest.artifact_metadata:
+            data["artifact_metadata"] = manifest.artifact_metadata
+        if manifest.format_metadata:
+            data["format_metadata"] = manifest.format_metadata
         for fentry in manifest.files:
             file_data = {
                 "path": fentry.path,
@@ -189,6 +319,8 @@ def _inspect_archive(
     print(f"  Version: {manifest.version}")
     print(f"  Tool: {manifest.tool} v{manifest.tool_version}")
     print(f"  Created: {manifest.created_at}")
+    if manifest.artifact_type and manifest.artifact_type != "unknown":
+        print(f"  Artifact type: {manifest.artifact_type}")
     print(f"  Original size: {_format_size(manifest.total_original_size)}")
     print(f"  Compressed size: {_format_size(manifest.total_compressed_size)}")
 
@@ -199,6 +331,23 @@ def _inspect_archive(
     print(f"  Ratio: {ratio:.2%}")
     print(f"  Files: {len(manifest.files)}")
     print()
+
+    # Show artifact metadata if present
+    if manifest.artifact_metadata:
+        print("Artifact metadata:")
+        for key, value in manifest.artifact_metadata.items():
+            print(f"  {key}: {value}")
+        print()
+
+    # Show format metadata if present
+    if manifest.format_metadata:
+        print("Format metadata:")
+        for fmt_name, fmt_data in manifest.format_metadata.items():
+            print(f"  {fmt_name}:")
+            if isinstance(fmt_data, dict):
+                for k, v in fmt_data.items():
+                    print(f"    {k}: {v}")
+        print()
 
     # Show compression summary if requested
     if show_compression:
@@ -291,20 +440,53 @@ def _get_overall_compression_summary(manifest: object) -> dict:
     }
 
 
-def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool = False) -> None:
+def _inspect_model(
+    target: Path,
+    json_output: bool = False,
+    show_tensors: bool = False,
+    show_lora: bool = False,
+    show_checkpoint: bool = False,
+    show_gguf: bool = False,
+) -> None:
     """Display AI model format information for a file or directory."""
     if target.is_file():
         results = [inspect_file(target)]
     else:
         results = inspect_directory(target)
 
+    # Detect artifact type
+    artifact_type = "unknown"
     dir_info = None
     if target.is_dir():
         dir_info = _get_directory_model_info(target)
+        artifact_type = dir_info.get("detected_type_artifact", "unknown")
+
+    # Check for explicit flags
+    if show_lora:
+        artifact_type = "lora_adapter"
+    elif show_checkpoint:
+        artifact_type = "training_checkpoint"
+    elif show_gguf:
+        artifact_type = "gguf_model"
+
+    # GGUF-specific inspection
+    if show_gguf and target.is_file() and target.suffix.lower() == ".gguf":
+        _inspect_gguf_file(target, json_output=json_output, show_tensors=show_tensors)
+        return
+
+    # LoRA-specific inspection
+    if show_lora and target.is_dir():
+        _inspect_lora_dir(target, json_output=json_output)
+        return
+
+    # Checkpoint-specific inspection
+    if show_checkpoint and target.is_dir():
+        _inspect_checkpoint_dir(target, json_output=json_output)
+        return
 
     if json_output:
-        data = {
-            "type": "model_directory" if target.is_dir() else "model_file",
+        data: dict = {
+            "artifact_type": artifact_type,
             "path": str(target),
         }
         if dir_info:
@@ -338,9 +520,9 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
     print("KMC Model Inspection")
     print()
     print(f"Path: {target}")
+    print(f"Artifact type: {artifact_type}")
 
     if dir_info:
-        print(f"Detected type: {dir_info.get('detected_type', 'unknown')}")
         print(f"Safetensors: {'yes' if dir_info.get('has_safetensors') else 'no'}")
         print(f"Sharded: {'yes' if dir_info.get('is_sharded') else 'no'}")
 
@@ -404,6 +586,172 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
                         print(f"      {key}: {value}")
 
 
+def _inspect_gguf_file(path: Path, json_output: bool = False, show_tensors: bool = False) -> None:
+    """Display detailed GGUF file information."""
+    from .formats.gguf import read_gguf_info
+
+    try:
+        info = read_gguf_info(path, parse_tensors=True)
+    except (ValueError, OSError) as e:
+        print(f"Error reading GGUF file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_output:
+        data = {
+            "artifact_type": "gguf_model",
+            "path": str(path),
+            "format": "gguf",
+            "version": info.version,
+            "endianness": info.endianness,
+            "tensor_count": info.tensor_count,
+            "metadata_kv_count": info.metadata_kv_count,
+            "file_size": info.file_size,
+            "quantization_summary": info.quantization_summary,
+            "warnings": info.warnings,
+        }
+        if show_tensors and info.tensors:
+            data["tensors"] = [
+                {
+                    "name": t.name,
+                    "shape": t.shape,
+                    "ggml_type": str(t.ggml_type),
+                    "offset": t.offset,
+                    "estimated_size": t.estimated_size,
+                }
+                for t in info.tensors
+            ]
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    # Human-readable output
+    print("KMC GGUF Inspection")
+    print()
+    print("Detected type: GGUF model")
+    print(f"Version: {info.version}")
+    print(f"Endianness: {info.endianness}")
+    print(f"Tensors: {info.tensor_count}")
+    print(f"Metadata KV pairs: {info.metadata_kv_count}")
+    print(f"File size: {_format_size(info.file_size)}")
+
+    if info.warnings:
+        print()
+        print("Warnings:")
+        for w in info.warnings:
+            print(f"  {w}")
+
+    if info.quantization_summary:
+        print()
+        print("Quantization summary:")
+        for qtype, count in sorted(info.quantization_summary.items()):
+            print(f"  {qtype}: {count}")
+    else:
+        print()
+        print("Quantization summary: unknown")
+
+    if show_tensors and info.tensors:
+        print()
+        shown = min(20, len(info.tensors))
+        print(f"Tensors (showing {shown}/{len(info.tensors)}):")
+        for t in info.tensors[:shown]:
+            shape_str = "x".join(str(d) for d in t.shape)
+            size_str = f" ({_format_size(t.estimated_size)})" if t.estimated_size else ""
+            print(f"  {t.name}: {t.ggml_type} [{shape_str}]{size_str}")
+        if len(info.tensors) > shown:
+            print(f"  ... and {len(info.tensors) - shown} more tensors")
+
+
+def _inspect_lora_dir(path: Path, json_output: bool = False) -> None:
+    """Display LoRA adapter information."""
+    from .workflows.lora import detect_lora_adapter
+
+    adapter_info = detect_lora_adapter(path)
+
+    if json_output:
+        data = {
+            "artifact_type": "lora_adapter",
+            "path": str(path),
+            "is_lora": adapter_info.is_lora,
+            "has_adapter_model": adapter_info.has_adapter_model,
+            "has_adapter_config": adapter_info.has_adapter_config,
+            "has_readme": adapter_info.has_readme,
+            "base_model_name_or_path": adapter_info.base_model_name_or_path,
+            "peft_type": adapter_info.peft_type,
+            "lora_rank": adapter_info.lora_rank,
+            "target_modules": adapter_info.target_modules,
+            "warnings": adapter_info.warnings,
+        }
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    print("KMC LoRA Adapter Inspection")
+    print()
+    print(f"Path: {path}")
+    print(f"Is LoRA: {'yes' if adapter_info.is_lora else 'no'}")
+    print(f"Has adapter model: {'yes' if adapter_info.has_adapter_model else 'no'}")
+    print(f"Has adapter config: {'yes' if adapter_info.has_adapter_config else 'no'}")
+    print(f"PEFT type: {adapter_info.peft_type}")
+    if adapter_info.lora_rank is not None:
+        print(f"Rank: {adapter_info.lora_rank}")
+    if adapter_info.target_modules:
+        print(f"Target modules: {', '.join(adapter_info.target_modules)}")
+    print(f"Base model: {adapter_info.base_model_name_or_path}")
+    if adapter_info.warnings:
+        print()
+        print("Warnings:")
+        for w in adapter_info.warnings:
+            print(f"  {w}")
+
+
+def _inspect_checkpoint_dir(path: Path, json_output: bool = False) -> None:
+    """Display training checkpoint information."""
+    from .workflows.checkpoint import detect_checkpoint
+
+    ckpt_info = detect_checkpoint(path)
+
+    if json_output:
+        data = {
+            "artifact_type": "training_checkpoint",
+            "path": str(path),
+            "is_checkpoint": ckpt_info.is_checkpoint,
+            "step": ckpt_info.step,
+            "has_trainer_state": ckpt_info.has_trainer_state,
+            "has_optimizer_state": ckpt_info.has_optimizer_state,
+            "has_scheduler_state": ckpt_info.has_scheduler_state,
+            "has_rng_state": ckpt_info.has_rng_state,
+            "has_safetensors_model": ckpt_info.has_safetensors_model,
+            "has_pytorch_model": ckpt_info.has_pytorch_model,
+            "detected_files": ckpt_info.detected_files,
+            "warnings": ckpt_info.warnings,
+        }
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    print("KMC Training Checkpoint Inspection")
+    print()
+    print(f"Path: {path}")
+    print(f"Is checkpoint: {'yes' if ckpt_info.is_checkpoint else 'no'}")
+    if ckpt_info.step is not None:
+        print(f"Step: {ckpt_info.step}")
+    print(f"Has trainer state: {'yes' if ckpt_info.has_trainer_state else 'no'}")
+    print(f"Has optimizer state: {'yes' if ckpt_info.has_optimizer_state else 'no'}")
+    print(f"Has scheduler state: {'yes' if ckpt_info.has_scheduler_state else 'no'}")
+    print(f"Has RNG state: {'yes' if ckpt_info.has_rng_state else 'no'}")
+    print(f"Has safetensors model: {'yes' if ckpt_info.has_safetensors_model else 'no'}")
+    print(f"Has pytorch model: {'yes' if ckpt_info.has_pytorch_model else 'no'}")
+
+    if ckpt_info.detected_files:
+        print()
+        print("Detected files:")
+        for fname, category in sorted(ckpt_info.detected_files.items()):
+            print(f"  {fname} ({category})")
+
+    if ckpt_info.warnings:
+        print()
+        print("Warnings:")
+        for w in ckpt_info.warnings:
+            print(f"  {w}")
+
+
 def _get_directory_model_info(directory: Path) -> dict:
     """Analyze a directory for model-level information."""
     from .formats.safetensors import detect_lora_adapter
@@ -446,19 +794,34 @@ def _get_directory_model_info(directory: Path) -> dict:
     lora_info = detect_lora_adapter(directory)
     is_lora = lora_info.get("is_lora", False)
 
+    # Determine artifact type (for the new artifact_type field)
     if is_lora:
+        detected_type_artifact = "lora_adapter"
         detected_type = "PEFT/LoRA adapter"
     elif has_safetensors and has_gguf:
+        detected_type_artifact = "huggingface_model"
         detected_type = "Mixed format model"
     elif has_safetensors:
+        detected_type_artifact = "huggingface_model"
         detected_type = "Hugging Face model folder"
     elif has_gguf:
+        detected_type_artifact = "gguf_model"
         detected_type = "GGUF model"
     else:
+        detected_type_artifact = "unknown"
         detected_type = "unknown"
+
+    # Check for checkpoint patterns
+    from .workflows.checkpoint import detect_checkpoint
+
+    ckpt_info = detect_checkpoint(directory)
+    if ckpt_info.is_checkpoint and not is_lora:
+        detected_type_artifact = "training_checkpoint"
+        detected_type = "Training checkpoint"
 
     return {
         "detected_type": detected_type,
+        "detected_type_artifact": detected_type_artifact,
         "has_safetensors": has_safetensors,
         "has_gguf": has_gguf,
         "is_sharded": is_sharded,
@@ -532,7 +895,48 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "byteplane", "floatplane", "zstd", "zlib", "raw"],
         help="Compression codec (default: auto)",
     )
+    p_pack.add_argument(
+        "--gguf-aware",
+        action="store_true",
+        help="Experimental: use GGUF-aware compression mode",
+    )
     p_pack.set_defaults(func=cmd_pack)
+
+    # pack-lora
+    p_pack_lora = sub.add_parser(
+        "pack-lora", help="Pack a LoRA adapter directory into a .kmc archive"
+    )
+    p_pack_lora.add_argument("source", help="LoRA adapter directory")
+    p_pack_lora.add_argument("output", help="Output .kmc archive path")
+    p_pack_lora.add_argument(
+        "-b", "--block-size", type=int, default=None, help="Block size in bytes"
+    )
+    p_pack_lora.add_argument("-l", "--level", type=int, default=3, help="Compression level")
+    p_pack_lora.add_argument(
+        "--codec",
+        default="auto",
+        choices=["auto", "byteplane", "floatplane", "zstd", "zlib", "raw"],
+        help="Compression codec (default: auto)",
+    )
+    p_pack_lora.set_defaults(func=cmd_pack_lora)
+
+    # pack-checkpoint
+    p_pack_ckpt = sub.add_parser(
+        "pack-checkpoint", help="Pack a training checkpoint directory into a .kmc archive"
+    )
+    p_pack_ckpt.add_argument("source", help="Training checkpoint directory")
+    p_pack_ckpt.add_argument("output", help="Output .kmc archive path")
+    p_pack_ckpt.add_argument(
+        "-b", "--block-size", type=int, default=None, help="Block size in bytes"
+    )
+    p_pack_ckpt.add_argument("-l", "--level", type=int, default=3, help="Compression level")
+    p_pack_ckpt.add_argument(
+        "--codec",
+        default="auto",
+        choices=["auto", "byteplane", "floatplane", "zstd", "zlib", "raw"],
+        help="Compression codec (default: auto)",
+    )
+    p_pack_ckpt.set_defaults(func=cmd_pack_checkpoint)
 
     # unpack
     p_unpack = sub.add_parser("unpack", help="Unpack a .kmc archive")
@@ -565,6 +969,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--compression",
         action="store_true",
         help="Show compression summary with codec usage",
+    )
+    p_inspect.add_argument(
+        "--lora",
+        action="store_true",
+        help="Inspect as LoRA adapter",
+    )
+    p_inspect.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Inspect as training checkpoint",
+    )
+    p_inspect.add_argument(
+        "--gguf",
+        action="store_true",
+        help="Inspect as GGUF model with tensor details",
     )
     p_inspect.set_defaults(func=cmd_inspect)
 

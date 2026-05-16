@@ -14,6 +14,13 @@ Format version history:
         - BlockEntry gains optional codec_metadata, tensor_name, tensor_dtype,
           tensor_shape fields for lossless codec reconstruction.
         - Backward-compatible: v1/v2 manifests read without errors in v3 readers.
+    - v4 (KMC v0.5): Adds artifact_type and format-level metadata.
+        - KMCManifest gains artifact_type, artifact_metadata, format_metadata.
+        - artifact_type: "huggingface_model"|"gguf_model"|"lora_adapter"|
+          "training_checkpoint"|"unknown"
+        - artifact_metadata: Dict with artifact-specific metadata (e.g., LoRA rank).
+        - format_metadata: Dict with format-specific metadata (e.g., GGUF info).
+        - Backward-compatible: v1/v2/v3 manifests read without errors in v4 readers.
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-KMC_MANIFEST_VERSION = 3  # v0.4-alpha with per-block codec metadata
+KMC_MANIFEST_VERSION = 4  # v0.5-alpha with artifact_type and format_metadata
 
 
 @dataclass
@@ -91,18 +98,23 @@ class KMCManifest:
     The format_version field distinguishes between manifest versions:
         - 1: Original format (KMC v0.1-v0.2)
         - 2: Tensor-aware format (KMC v0.3)
-        - 3: Per-block codec metadata (KMC v0.4+)
-    Version 3 manifests are backward-compatible: readers that only understand
-    version 1/2 can safely ignore the codec_metadata and tensor fields.
+        - 3: Per-block codec metadata (KMC v0.4)
+        - 4: Artifact type and format metadata (KMC v0.5+)
+    Version 4 manifests are backward-compatible: readers that only understand
+    version 1/2/3 can safely ignore the artifact and format fields.
     """
 
     version: int = KMC_MANIFEST_VERSION
     tool: str = "kimari-microcompress"
-    tool_version: str = "0.4.0-alpha"
+    tool_version: str = "0.5.0-alpha"
     created_at: str = ""
     total_original_size: int = 0
     total_compressed_size: int = 0
     files: list[FileEntry] = field(default_factory=list)
+    # v0.5 fields (optional, for artifact-aware workflows)
+    artifact_type: str = "unknown"  # huggingface_model|gguf_model|lora_adapter|...
+    artifact_metadata: dict = field(default_factory=dict)
+    format_metadata: dict = field(default_factory=dict)
 
     def to_json(self) -> str:
         """Serialize manifest to JSON string."""
@@ -112,7 +124,7 @@ class KMCManifest:
     def from_json(cls, raw: str) -> KMCManifest:
         """Deserialize manifest from JSON string.
 
-        Handles v1, v2, and v3 manifests. Missing fields default
+        Handles v1, v2, v3, and v4 manifests. Missing fields default
         to empty/zero values for backward compatibility.
         """
         data = json.loads(raw)
@@ -155,6 +167,9 @@ class KMCManifest:
             total_original_size=data.get("total_original_size", 0),
             total_compressed_size=data.get("total_compressed_size", 0),
             files=files,
+            artifact_type=data.get("artifact_type", "unknown"),
+            artifact_metadata=data.get("artifact_metadata", {}),
+            format_metadata=data.get("format_metadata", {}),
         )
 
     def to_bytes(self) -> bytes:

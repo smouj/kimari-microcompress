@@ -10,6 +10,12 @@ v0.4 additions:
     - Per-block codec metadata stored in manifest
     - --codec flag supports: auto, byteplane, floatplane, zstd, zlib, raw
     - Tensor-aware mode now applies dtype-specific codecs
+
+v0.5 additions:
+    - GGUF-aware compression mode (--gguf-aware)
+    - Artifact type and metadata in manifest
+    - LoRA and checkpoint workflow support
+    - Format-specific metadata (safetensors, GGUF) in manifest
 """
 
 from __future__ import annotations
@@ -389,6 +395,54 @@ def _decompress_block_with_metadata(
 
 
 # ---------------------------------------------------------------------------
+# GGUF-aware helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_gguf_format_metadata(path: Path) -> dict:
+    """Read GGUF format metadata for the manifest."""
+    try:
+        from .formats.gguf import is_gguf_file, read_gguf_info
+
+        if not is_gguf_file(path):
+            return {}
+
+        info = read_gguf_info(path, parse_tensors=True)
+        metadata: dict = {
+            "version": info.version,
+            "endianness": info.endianness,
+            "tensor_count": info.tensor_count,
+            "metadata_kv_count": info.metadata_kv_count,
+        }
+        if info.quantization_summary:
+            metadata["quantization_summary"] = info.quantization_summary
+        if info.tensors:
+            metadata["tensor_names"] = [t.name for t in info.tensors[:100]]
+        if info.warnings:
+            metadata["parse_warnings"] = info.warnings
+        return metadata
+    except (ValueError, OSError):
+        return {}
+
+
+def _is_gguf_quantized(path: Path) -> bool:
+    """Check if a GGUF file contains quantized tensors."""
+    try:
+        from .formats.gguf import is_gguf_file, is_quantized_ggml_type, read_gguf_info
+
+        if not is_gguf_file(path):
+            return False
+
+        info = read_gguf_info(path, parse_tensors=True)
+        for tensor in info.tensors:
+            if is_quantized_ggml_type(tensor.ggml_type):
+                return True
+        return False
+    except (ValueError, OSError):
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Pack
 # ---------------------------------------------------------------------------
 
@@ -400,6 +454,9 @@ def pack(
     level: int = 3,
     tensor_aware: bool = False,
     codec: str = "auto",
+    gguf_aware: bool = False,
+    artifact_type: str = "unknown",
+    artifact_metadata: dict | None = None,
 ) -> None:
     """Pack a directory or single file into a .kmc archive.
 
@@ -411,6 +468,9 @@ def pack(
         tensor_aware: If True, attempt to align blocks to tensor boundaries
             for safetensors files and record tensor metadata in the manifest.
         codec: Codec to use: 'auto', 'byteplane', 'floatplane', 'zstd', 'zlib', 'raw'.
+        gguf_aware: If True, enable experimental GGUF-aware compression mode.
+        artifact_type: Artifact type for the manifest (e.g., 'lora_adapter').
+        artifact_metadata: Artifact-specific metadata for the manifest.
     """
     source = Path(source).resolve()
     output = Path(output).resolve()
@@ -423,6 +483,8 @@ def pack(
 
     manifest = KMCManifest(
         created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        artifact_type=artifact_type,
+        artifact_metadata=artifact_metadata or {},
     )
 
     all_blocks: list[tuple[int, int, BlockEntry, bytes]] = []
@@ -459,6 +521,27 @@ def pack(
                     header_size = info.header_size
                 except (ValueError, OSError):
                     pass
+
+        # GGUF-aware mode: read GGUF metadata and adjust codec strategy
+        file_codec = codec
+        if gguf_aware and fpath.suffix.lower() == ".gguf":
+            # Record GGUF format metadata
+            gguf_meta = _get_gguf_format_metadata(fpath)
+            if gguf_meta:
+                if not manifest.format_metadata:
+                    manifest.format_metadata = {}
+                manifest.format_metadata["gguf"] = gguf_meta
+
+                # Set artifact type if not already set
+                if manifest.artifact_type == "unknown":
+                    manifest.artifact_type = "gguf_model"
+
+            # For GGUF files with quantized tensors, avoid floatplane
+            # and prefer zstd/zlib/raw (quantized data doesn't benefit from
+            # float-aware transforms)
+            if _is_gguf_quantized(fpath):
+                if codec in ("auto", "floatplane", "byteplane"):
+                    file_codec = "zstd" if is_zstd_available() else "zlib"
 
         file_entry = FileEntry(
             path=rel_str,
@@ -513,7 +596,7 @@ def pack(
 
                 # Compress with selected codec
                 compressed_payload, codec_used, codec_meta = _compress_block_with_codec(
-                    chunk, codec_name=codec, context=ctx
+                    chunk, codec_name=file_codec, context=ctx
                 )
 
                 block_hash = sha256_block(compressed_payload)
@@ -540,6 +623,16 @@ def pack(
 
         manifest.files.append(file_entry)
 
+    # Auto-detect artifact type from directory contents if still unknown
+    if manifest.artifact_type == "unknown" and source.is_dir():
+        manifest.artifact_type = _detect_artifact_type(source)
+
+    # Auto-detect format metadata for safetensors if not already set
+    if source.is_dir() and "safetensors" not in manifest.format_metadata:
+        safetensors_meta = _detect_safetensors_format_metadata(source)
+        if safetensors_meta:
+            manifest.format_metadata["safetensors"] = safetensors_meta
+
     # Compute correct offsets iteratively
     for _ in range(20):
         manifest_bytes = manifest.to_bytes()
@@ -563,6 +656,59 @@ def pack(
         out.write(manifest_bytes)
         for _file_idx, _block_idx, _block_entry, block_data in all_blocks:
             out.write(block_data)
+
+
+def _detect_artifact_type(source: Path) -> str:
+    """Auto-detect the artifact type from directory contents."""
+    from .workflows.checkpoint import detect_checkpoint
+    from .workflows.lora import detect_lora_adapter
+
+    # Check LoRA first (more specific)
+    adapter_info = detect_lora_adapter(source)
+    if adapter_info.is_lora:
+        return "lora_adapter"
+
+    # Check checkpoint
+    ckpt_info = detect_checkpoint(source)
+    if ckpt_info.is_checkpoint:
+        return "training_checkpoint"
+
+    # Check for GGUF files
+    for f in source.rglob("*.gguf"):
+        if f.is_file():
+            return "gguf_model"
+
+    # Check for safetensors files
+    for f in source.rglob("*.safetensors"):
+        if f.is_file():
+            return "huggingface_model"
+
+    return "unknown"
+
+
+def _detect_safetensors_format_metadata(source: Path) -> dict:
+    """Detect safetensors format metadata from a directory."""
+    from .formats.safetensors import detect_safetensors_shards
+
+    shards = detect_safetensors_shards(source)
+    if shards:
+        return {"is_sharded": True, "shard_count": len(shards)}
+
+    for f in source.rglob("*.safetensors"):
+        if f.is_file():
+            try:
+                from .formats.safetensors import read_safetensors_info
+
+                info = read_safetensors_info(f)
+                return {
+                    "is_sharded": info.is_shard,
+                    "tensor_count": info.tensor_count,
+                    "dtypes": info.dtypes,
+                }
+            except (ValueError, OSError):
+                pass
+
+    return {}
 
 
 def _validate_codec_choice(codec: str, tensor_aware: bool) -> None:
@@ -648,7 +794,7 @@ def verify_full(archive: Path) -> VerificationReport:
     report.compressed_size = manifest.total_compressed_size
     report.restored_size = manifest.total_original_size
 
-    if manifest.version not in (1, 2, 3):
+    if manifest.version not in (1, 2, 3, 4):
         report.warnings.append(f"Unknown manifest version: v{manifest.version}")
 
     structural_errors = validate_manifest(manifest)

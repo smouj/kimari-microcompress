@@ -1,14 +1,17 @@
 """Kimari CLI adapter example: demonstrates how to integrate KMC with Kimari.
 
 This example shows how the Kimari CLI can use the KMC integration layer
-to provide compression, decompression, verification, and benchmark
-commands without directly depending on KMC internals.
+to provide compression, decompression, verification, benchmark,
+LoRA, and checkpoint commands without directly depending on KMC internals.
 
 Usage:
     python examples/kimari_cli_adapter.py compress ./model ./model.kmc
+    python examples/kimari_cli_adapter.py compress-lora ./adapter ./adapter.kmc
+    python examples/kimari_cli_adapter.py compress-checkpoint ./ckpt ./ckpt.kmc
     python examples/kimari_cli_adapter.py decompress ./model.kmc ./restored
     python examples/kimari_cli_adapter.py verify ./model.kmc
-    python examples/kimari_cli_adapter.py bench ./model ./model.kmc --compare-zipnn
+    python examples/kimari_cli_adapter.py bench ./model ./model.kmc
+    python examples/kimari_cli_adapter.py inspect-model ./model
 """
 
 from __future__ import annotations
@@ -26,8 +29,37 @@ def cmd_compress(args: argparse.Namespace) -> None:
         source=args.source,
         output=args.output,
         tensor_aware=getattr(args, "tensor_aware", True),
+        gguf_aware=getattr(args, "gguf_aware", False),
     )
     print(json.dumps(result, indent=2))
+
+
+def cmd_compress_lora(args: argparse.Namespace) -> None:
+    """Kimari compress-lora command."""
+    from kmc.integrations.kimari import kimari_pack_lora
+
+    result = kimari_pack_lora(
+        input_path=args.source,
+        output_path=args.output,
+    )
+    print(json.dumps(result, indent=2))
+
+    if result.get("status") == "error":
+        sys.exit(1)
+
+
+def cmd_compress_checkpoint(args: argparse.Namespace) -> None:
+    """Kimari compress-checkpoint command."""
+    from kmc.integrations.kimari import kimari_pack_checkpoint
+
+    result = kimari_pack_checkpoint(
+        input_path=args.source,
+        output_path=args.output,
+    )
+    print(json.dumps(result, indent=2))
+
+    if result.get("status") == "error":
+        sys.exit(1)
 
 
 def cmd_decompress(args: argparse.Namespace) -> None:
@@ -70,6 +102,17 @@ def cmd_bench_compress(args: argparse.Namespace) -> None:
         print(format_benchmark_table(result))
 
 
+def cmd_inspect_model(args: argparse.Namespace) -> None:
+    """Kimari inspect-model command."""
+    from kmc.integrations.kimari import kimari_inspect_model
+
+    result = kimari_inspect_model(
+        input_path=args.source,
+        json_output=True,
+    )
+    print(json.dumps(result, indent=2))
+
+
 def main() -> None:
     """Entry point for the Kimari CLI adapter example."""
     parser = argparse.ArgumentParser(
@@ -88,7 +131,24 @@ def main() -> None:
         action="store_false",
         help="Disable tensor-aware mode",
     )
+    p_compress.add_argument(
+        "--gguf-aware",
+        action="store_true",
+        help="Enable experimental GGUF-aware mode",
+    )
     p_compress.set_defaults(func=cmd_compress)
+
+    # compress-lora
+    p_lora = sub.add_parser("compress-lora", help="Compress a LoRA adapter")
+    p_lora.add_argument("source", help="LoRA adapter directory")
+    p_lora.add_argument("output", help="Output .kmc archive path")
+    p_lora.set_defaults(func=cmd_compress_lora)
+
+    # compress-checkpoint
+    p_ckpt = sub.add_parser("compress-checkpoint", help="Compress a training checkpoint")
+    p_ckpt.add_argument("source", help="Checkpoint directory")
+    p_ckpt.add_argument("output", help="Output .kmc archive path")
+    p_ckpt.set_defaults(func=cmd_compress_checkpoint)
 
     # decompress
     p_decompress = sub.add_parser("decompress", help="Decompress a .kmc archive")
@@ -118,6 +178,11 @@ def main() -> None:
         help="Disable tensor-aware mode",
     )
     p_bench.set_defaults(func=cmd_bench_compress)
+
+    # inspect-model
+    p_inspect = sub.add_parser("inspect-model", help="Inspect a model")
+    p_inspect.add_argument("source", help="Model directory or file")
+    p_inspect.set_defaults(func=cmd_inspect_model)
 
     args = parser.parse_args()
     if not args.command:

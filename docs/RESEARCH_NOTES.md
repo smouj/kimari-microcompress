@@ -4,13 +4,13 @@
 
 ### ZipNN (IBM Research)
 
-**Paper**: "A Lossless Compression for AI Models" — IBM Research  
+**Paper**: "A Lossless Compression for AI Models" -- IBM Research
 **URL**: https://research.ibm.com/publications/a-lossless-compression-for-ai-models
 
 Key findings:
 - ZipNN achieves approximately 1/3 size reduction on popular AI models without any modification to the weights.
 - In some cases, compression exceeds 50% reduction.
-- The approach is lossless — weights are byte-identical after decompression.
+- The approach is lossless -- weights are byte-identical after decompression.
 - This validates the core premise of KMC: AI model files contain significant compressible redundancy that general-purpose tools don't fully exploit.
 
 Implications for KMC:
@@ -20,7 +20,7 @@ Implications for KMC:
 
 ### NetZIP (IBM Research)
 
-**Paper**: "NetZIP: Algorithm-Hardware Co-Design of In-Network Lossless Compression for Distributed Large Model Training" — IBM Research  
+**Paper**: "NetZIP: Algorithm-Hardware Co-Design of In-Network Lossless Compression for Distributed Large Model Training" -- IBM Research
 **URL**: https://research.ibm.com/publications/netzip-algorithmhardware-co-design-of-in-network-lossless-compression-for-distributed-large-model-training
 
 Key findings:
@@ -55,16 +55,19 @@ Why KMC prioritizes safetensors:
 ### GGUF (llama.cpp)
 
 **Documentation**: https://www.mintlify.com/ggml-org/llama.cpp/concepts/gguf-format
+**Format specification**: https://github.com/ggerhanov/ggml/blob/master/docs/gguf.md
 
 Key characteristics:
 - Binary format with a header containing metadata key-value pairs.
-- Supports multiple quantization levels (Q4_0, Q5_1, Q8_0, etc.).
+- Supports multiple quantization levels (Q4_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K, etc.).
 - Designed for efficient CPU inference via llama.cpp.
 - Single-file distribution model.
+- Tensor info section contains per-tensor name, dimensions, type, and offset.
 
-Why GGUF is a future integration target:
-- Already quantized, so additional compression has limited benefit.
+Why GGUF is an integration target:
+- Already quantized, so additional compression has limited benefit on quantized tensors.
 - However, vocabulary data, metadata, and padding can still be compressed.
+- F32/F16/BF16 tensors within GGUF files can benefit from float-aware codecs.
 - GGUF's quantization is lossy (modifying weights); KMC's compression is lossless (preserving weights).
 - Block-loading of GGUF files could enable partial model loading.
 
@@ -96,13 +99,185 @@ KMC uses zstd as the primary codec because:
 - Used when compression doesn't reduce size.
 - Ensures KMC never expands data.
 
+## GGUF Tensor Metadata Parsing (v0.5)
+
+### GGUF File Structure
+
+A GGUF file has the following layout:
+
+```
+[Header]
+  magic:        4 bytes ("GGUF")
+  version:      4 bytes (uint32)
+  tensor_count: 8 bytes (uint64, v2/v3) or 4 bytes (uint32, v1)
+  kv_count:     8 bytes (uint64, v2/v3) or 4 bytes (uint32, v1)
+
+[Metadata KV Pairs]
+  For each pair:
+    key:   GGUF string (8-byte length + UTF-8 data)
+    type:  4 bytes (uint32, GGUF metadata type)
+    value: variable (depends on type)
+
+[Tensor Info]
+  For each tensor:
+    name:        GGUF string
+    n_dims:      4 bytes (uint32)
+    dims:        n_dims * 8 bytes (uint64 each)
+    type:        4 bytes (uint32, GGML type ID)
+    offset:      8 bytes (uint64, offset within tensor data region)
+
+[Padding to alignment]
+
+[Tensor Data]
+```
+
+### GGML Quantization Types
+
+KMC v0.5 recognizes the following GGML type IDs:
+
+| Type ID | Name | Description | Bits/Weight |
+|---------|------|-------------|-------------|
+| 0 | F32 | 32-bit float | 32 |
+| 1 | F16 | 16-bit float | 16 |
+| 2 | Q4_0 | 4-bit quantization (block 32) | 4.5 |
+| 3 | Q4_1 | 4-bit quantization with min/max | 5 |
+| 6 | Q5_0 | 5-bit quantization (block 32) | 5.5 |
+| 7 | Q5_1 | 5-bit quantization with min/max | 6 |
+| 8 | Q8_0 | 8-bit quantization (block 32) | 8.5 |
+| 10 | Q2_K | 2-bit K-quant | 2.5625 |
+| 11 | Q3_K | 3-bit K-quant | 3.4375 |
+| 12 | Q4_K | 4-bit K-quant | 4.5 |
+| 13 | Q5_K | 5-bit K-quant | 5.5 |
+| 14 | Q6_K | 6-bit K-quant | 6.5625 |
+| 15 | Q8_K | 8-bit K-quant | 8.5 |
+| 29 | BF16 | Brain float 16 | 16 |
+
+### Implications for Compression
+
+1. **Quantized tensors (Q2_K through Q8_K, Q4_0, Q5_0, etc.)**: These are already compressed representations. Applying floatplane or byteplane transforms to them is counterproductive -- the data is not floating-point and the transforms add overhead. The `--gguf-aware` flag detects quantized tensors and skips float-aware codecs, using zstd/zlib directly.
+
+2. **Floating-point tensors (F32, F16, BF16)**: These can benefit from BytePlane and FloatPlane codecs. A GGUF file with mixed F32 and Q4_K tensors should use different codec strategies for different blocks.
+
+3. **Metadata KV pairs**: These are typically small and contain model name, architecture description, tokenizer data, and other text. They compress well with zstd.
+
+4. **Vocabulary/embedding data**: Token embedding tensors in GGUF files are typically F32 or F16 and can benefit from float-aware codecs.
+
+### Size Estimation
+
+For quantized types, tensor byte size is estimated using known block sizes and elements-per-block:
+
+```
+num_blocks = ceil(total_elements / elements_per_block)
+estimated_size = num_blocks * block_size_bytes
+```
+
+For example, Q4_K uses 144 bytes per block of 256 elements.
+
+## LoRA Adapter Detection (v0.5)
+
+### Detection Strategy
+
+LoRA adapters are detected through multiple signals:
+
+1. **File naming**: `adapter_model.safetensors` or any `.safetensors` file with "adapter" in the name.
+2. **Tensor name patterns**: Tensors named with `lora_A.weight` or `lora_B.weight` suffixes.
+3. **Configuration file**: `adapter_config.json` with PEFT type, rank, and target module information.
+4. **Companion files**: `README.md` in the same directory.
+
+### LoRA Tensor Structure
+
+LoRA adapters store low-rank decomposition matrices:
+
+```
+Original: W (d_model x d_model)
+LoRA:     W + (B @ A) * alpha/rank
+          where A: d_model x r, B: r x d_model
+```
+
+This means:
+- `lora_A.weight` tensors have shape `[r, d_model]` (rank x dimension)
+- `lora_B.weight` tensors have shape `[d_model, r]` (dimension x rank)
+- The rank `r` is typically much smaller than `d_model` (8, 16, 32, 64)
+- These low-rank matrices have significant structure that may benefit from compression
+
+### Metadata from adapter_config.json
+
+The `adapter_config.json` file (PEFT format) contains:
+
+```json
+{
+  "peft_type": "LORA",
+  "r": 16,
+  "lora_alpha": 32,
+  "target_modules": ["q_proj", "v_proj"],
+  "base_model_name_or_path": "meta-llama/Llama-2-7b-hf",
+  "task_type": "CAUSAL_LM"
+}
+```
+
+KMC extracts: `peft_type`, `r` (rank), `target_modules`, and `base_model_name_or_path`. Missing fields default to `"unknown"`.
+
+### Rank Inference
+
+When `adapter_config.json` does not specify the rank, KMC can infer it from tensor shapes:
+- `lora_A.weight` tensors have shape `[rank, d_model]` -- the first dimension is the rank.
+- `lora_B.weight` tensors have shape `[d_model, rank]` -- the second dimension is the rank.
+
+## Training Checkpoint Detection (v0.5)
+
+### Checkpoint Directory Structure
+
+Hugging Face training checkpoints typically have the following structure:
+
+```
+checkpoint-1000/
+  config.json
+  model.safetensors              (or pytorch_model.bin)
+  optimizer.pt                   (pickle-based, NOT loaded by KMC)
+  scheduler.pt                   (pickle-based, NOT loaded by KMC)
+  trainer_state.json
+  training_args.bin              (pickle-based, NOT loaded by KMC)
+  rng_state.pth                  (pickle-based, NOT loaded by KMC)
+  global_step.json
+  generation_config.json
+  tokenizer.json
+  tokenizer_config.json
+  special_tokens_map.json
+  README.md
+```
+
+### Pickle Safety
+
+The following files are pickle-based and are **never deserialized** by KMC:
+
+- `optimizer.pt`
+- `optimizer_state.pt`
+- `scheduler.pt`
+- `scaler.pt`
+- `rng_state.pth`
+- `rng_state_0.pth`
+- `training_args.bin`
+- `pytorch_model.bin`
+
+KMC detects these files by name, records their presence, size, and hash, and compresses them as raw bytes. No pickle deserialization is ever performed.
+
+### Step Inference
+
+The training step is inferred from:
+
+1. **Directory name**: If the directory is named `checkpoint-1000`, the step is 1000.
+2. **`global_step.json`**: If present, reads `{"global_step": 1000}`.
+3. **`trainer_state.json`**: If present, reads `{"global_step": 1000}` from the trainer state.
+
 ## Future Research Directions
 
 1. **Dictionary compression**: Train a zstd dictionary on a set of model blocks to improve per-block compression ratios.
-2. **Tensor-type-aware compression**: Use dtype information from safetensors headers to apply dtype-specific compression (e.g., XOR delta encoding for float16 weights). — *Partially addressed in v0.4 with BytePlane and FloatPlane codecs.*
+2. **Tensor-type-aware compression**: Use dtype information from safetensors headers to apply dtype-specific compression (e.g., XOR delta encoding for float16 weights). -- *Partially addressed in v0.4 with BytePlane and FloatPlane codecs.*
 3. **Cross-file deduplication**: Detect identical tensors across different files in the same archive and store them once.
 4. **Sparse tensor support**: Compress sparse tensors by storing only non-zero values with index information.
 5. **Neural compression**: Train small neural networks to compress weight matrices more efficiently than general-purpose codecs.
+6. **LoRA delta compression**: Instead of compressing raw LoRA weights, compute the delta between the LoRA adapter and the base model's corresponding weights. This delta may compress better than the raw weights, especially for small-rank adapters.
+7. **GGUF block-level compression**: Skip already-quantized blocks entirely (store raw) and only compress the metadata, vocabulary, and F32/F16/BF16 tensor sections.
 
 ---
 
@@ -240,4 +415,4 @@ Unsupported dtypes (INT8, INT4, etc.) cause FloatPlane to fall back to BytePlane
 
 5. **Adaptive plane selection**: Instead of always separating into sign/exponent/mantissa, an adaptive codec could measure the entropy of different plane configurations and choose the one that minimizes total compressed size. For example, for BF16 with uniform exponents, separating into just 2 planes (sign+exponent, mantissa) might be better than 3 planes.
 
-6. **GGUF quantization-aware compression**: Understanding the internal structure of GGUF quantization blocks (Q4_K, Q5_1, etc.) could enable codecs that skip already-quantized blocks and focus on compressible metadata and vocabulary data.
+6. **GGUF quantization-aware compression**: Understanding the internal structure of GGUF quantization blocks (Q4_K, Q5_1, etc.) could enable codecs that skip already-quantized blocks and focus on compressible metadata and vocabulary data. This is partially addressed by the `--gguf-aware` flag, which avoids float-aware codecs on quantized data.
