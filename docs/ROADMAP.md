@@ -1,20 +1,26 @@
 # Roadmap
 
+This document tracks the development progress and future plans for Kimari MicroCompress. Each version represents a milestone with specific goals and deliverables.
+
 ## Known Limitations (Current)
 
-These are **real, documented limitations** of the current KMC implementation. They are not bugs -- they are scope boundaries:
+These are **real, documented limitations** of the current KMC implementation. They are not bugs — they are scope boundaries:
 
 1. **KMC does NOT reduce VRAM during inference.** Compressed archives must be fully unpacked before a model can be loaded. Block-loading is future research.
 2. **KMC does NOT modify model weights.** Compression is strictly lossless. No quality degradation occurs at any point.
 3. **Block-loading is not implemented.** The manifest contains per-block offsets, but on-demand decompression of individual blocks is a future feature.
-4. **GGUF-aware compression is experimental.** The `--gguf-aware` flag adjusts codec selection for quantized tensors, but does not yet implement block-level GGUF-specific compression strategies (e.g., skipping already-quantized blocks entirely).
-5. **No fixed compression ratios.** Results depend heavily on model format, data type, and content. Synthetic benchmarks produce misleadingly high ratios and should not be used as references.
-6. **KMC is not quantization.** If you need smaller models for inference, use quantization (GGUF Q4_K, GPTQ, AWQ, etc.). KMC is complementary: it compresses files for storage and transfer.
-7. **No pickle deserialization.** KMC never loads pickle-based files (optimizer.pt, training_args.bin, pytorch_model.bin). These are compressed as raw bytes only, with size and hash recorded.
+4. **GGUF-aware compression is experimental.** The `--gguf-aware` flag adjusts codec selection for quantized tensors, but does not yet implement block-level GGUF-specific compression strategies.
+5. **No fixed compression ratios.** Results depend heavily on model format, data type, and content. Synthetic benchmarks produce misleadingly high ratios.
+6. **KMC is not quantization.** Use quantization (GGUF Q4_K, GPTQ, AWQ) for smaller inference models. KMC is complementary: it compresses files for storage and transfer.
+7. **No pickle deserialization.** KMC never loads pickle-based files (optimizer.pt, training_args.bin, pytorch_model.bin). These are compressed as raw bytes with size/hash recorded.
 8. **LoRA delta compression is not yet implemented.** LoRA adapters are compressed using standard or tensor-aware mode. Delta compression relative to a base model is future work.
 9. **KMC is lossless only.** There is no lossy mode and no weight modification of any kind.
+10. **No streaming I/O.** The entire archive must be loaded into memory for operations. Streaming pack/unpack for minimal memory footprint is planned for v0.6.
+11. **No parallel compression.** Blocks are compressed sequentially. Parallel block compression is planned for v0.6.
 
-## v0.1 -- MVP Archive
+---
+
+## v0.1 — MVP Archive ✅ Completed
 
 The initial release establishes the core infrastructure:
 
@@ -30,7 +36,7 @@ The initial release establishes the core infrastructure:
 - [x] Basic roundtrip and manifest tests
 - [x] CI with GitHub Actions (pytest + ruff)
 
-## v0.2 -- Security + Verification + Benchmark
+## v0.2 — Security + Verification + Benchmark ✅ Completed
 
 Focus on security, robustness, and realistic testing:
 
@@ -50,7 +56,7 @@ Focus on security, robustness, and realistic testing:
 - [x] Kimari CLI integration adapters
 - [x] Documented limitations in README and ROADMAP
 
-## v0.3 -- Safetensors + ZipNN Comparison + GGUF Parser
+## v0.3 — Safetensors + ZipNN Comparison + GGUF Parser ✅ Completed
 
 Real safetensors support, ZipNN benchmark comparison, and minimal GGUF parser:
 
@@ -66,16 +72,12 @@ Real safetensors support, ZipNN benchmark comparison, and minimal GGUF parser:
 - [x] `kmc inspect --json` and `kmc inspect --tensors` CLI flags
 - [x] Directory-level model inspection (detected type, sharding, LoRA, etc.)
 - [x] ZipNN benchmark comparison (`--compare-zipnn`)
-- [x] Environment metadata in benchmark output (Python, OS, CPU, RAM, versions)
+- [x] Environment metadata in benchmark output
 - [x] No invented benchmarks or superiority claims
-- [x] Dedicated `src/kmc/formats/gguf.py` module with endianness detection
-- [x] GGUF header: magic, version, endianness, tensor count, KV count, file size
-- [x] Synthetic GGUF test files
-- [x] Kimari CLI adapter with `tensor_aware` and `compare_zipnn` support
+- [x] Dedicated GGUF module with endianness detection
 - [x] Hugging Face workflow documentation
-- [x] Updated README, ROADMAP, ARCHITECTURE, BENCHMARK_PLAN
 
-## v0.4 -- Tensor-Aware Block Codecs (Completed)
+## v0.4 — Tensor-Aware Block Codecs ✅ Completed
 
 Real tensor-specific compression algorithms:
 
@@ -91,17 +93,15 @@ Real tensor-specific compression algorithms:
 - [x] `scripts/bench_small_hf_model.py` for real model benchmarks
 - [x] 161 tests passing, ruff clean
 
-> **Note:** KMC v0.4 does NOT reduce inference VRAM. It compresses model storage and transfer artifacts. Runtime compressed loading remains future work.
+## v0.5 — GGUF Metadata + LoRA/Checkpoint Workflows ✅ Completed
 
-## v0.5 -- GGUF Metadata + LoRA Workflows + Real Benchmarks (Completed)
-
-Full GGUF tensor metadata parsing, specialized workflows for LoRA adapters and training checkpoints, experimental GGUF-aware compression, and real model benchmarks:
+Full GGUF tensor metadata parsing, specialized workflows, experimental GGUF-aware compression:
 
 - [x] GGUF tensor metadata parsing (full tensor descriptors: name, shape, type, offset, size)
 - [x] GGUF quantization summary (e.g., Q4_K: 201, F32: 1)
 - [x] Experimental `--gguf-aware` compression mode
 - [x] Manifest v4 with `artifact_type`, `artifact_metadata`, `format_metadata`
-- [x] Artifact auto-detection (`huggingface_model|gguf_model|lora_adapter|training_checkpoint|unknown`)
+- [x] Artifact auto-detection (huggingface_model, gguf_model, lora_adapter, training_checkpoint, unknown)
 - [x] LoRA/PEFT adapter workflow: `kmc pack-lora` and `kmc inspect --lora`
 - [x] Training checkpoint workflow: `kmc pack-checkpoint` and `kmc inspect --checkpoint`
 - [x] GGUF inspection workflow: `kmc inspect --gguf` with tensor details
@@ -110,12 +110,16 @@ Full GGUF tensor metadata parsing, specialized workflows for LoRA adapters and t
 - [x] `workflows/` subpackage with `lora.py` and `checkpoint.py`
 - [x] Backward compatible with .kmc v0.2/v0.3/v0.4
 - [x] 228 tests passing, ruff clean
+- [x] CONTRIBUTING.md and CHANGELOG.md added
+- [x] Enhanced CI with lint + format + CLI verification
 
-> **Note:** KMC v0.5 does NOT reduce inference VRAM. The `--gguf-aware` flag is experimental and may change in future releases. No pickle is used at any point.
+---
 
-## v0.6 -- Kimari CLI + Streaming + Parallel
+## v0.6 — Kimari CLI + Streaming + Parallel (Next)
 
-Full integration with the Kimari ecosystem and performance improvements:
+Full integration with the Kimari ecosystem and performance improvements. This version focuses on production readiness: performance, reliability, and seamless integration.
+
+### Kimari CLI Integration
 
 - [ ] `kimari compress` command in Kimari CLI
 - [ ] `kimari decompress` command
@@ -124,40 +128,133 @@ Full integration with the Kimari ecosystem and performance improvements:
 - [ ] `kimari compress-lora` command
 - [ ] `kimari compress-checkpoint` command
 - [ ] Shared configuration (block size, compression level)
-- [ ] Progress reporting integration
+- [ ] Progress reporting integration with Kimari UI
 - [ ] KimariDB storage backend integration
-- [ ] Parallel block compression/decompression
-- [ ] Streaming pack/unpack for minimal memory footprint
+- [ ] Content-addressed archive storage
 
-## v0.7 -- Experimental Loader/Runtime Work
+### Streaming I/O
 
-Block-level loading and runtime integration:
+- [ ] Streaming pack: process files without loading entire archive into memory
+- [ ] Streaming unpack: write blocks incrementally without full archive buffering
+- [ ] Memory-mapped manifest reading for large archives
+- [ ] Progress callbacks for long-running operations
+- [ ] Estimated time remaining based on throughput
+
+### Parallel Compression
+
+- [ ] Parallel block compression using `concurrent.futures` or `multiprocessing`
+- [ ] Configurable worker count (default: number of CPU cores)
+- [ ] Thread-safe codec operations (ensure all codecs are reentrant)
+- [ ] Parallel block decompression for faster unpack
+- [ ] Benchmark parallel vs sequential performance
+
+### Reliability
+
+- [ ] Resume interrupted pack operations (checkpoint file)
+- [ ] Resume interrupted unpack operations
+- [ ] Archive corruption detection and partial recovery
+- [ ] Comprehensive error messages with actionable suggestions
+- [ ] Logging framework integration (structured logging)
+
+## v0.7 — Experimental Loader/Runtime Work
+
+Block-level loading and runtime integration. This is the most ambitious milestone, enabling KMC to serve as a model loading backend rather than just a storage format.
+
+### Block-Level Loading
 
 - [ ] Block-level loading (partial decompression on demand)
-- [ ] Block server for remote block fetching
+- [ ] `BlockServer` class for programmatic block access
+- [ ] Load specific tensors by name without decompressing the entire archive
+- [ ] Load tensor ranges (e.g., first N layers)
 - [ ] Memory-mapped archive reading for large files
+
+### Runtime Integration
+
 - [ ] Python API for programmatic block access
-- [ ] Integration with model loading frameworks
-- [ ] Runtime compressed loading (research phase)
+- [ ] Integration with Hugging Face `from_pretrained()` loading
+- [ ] Integration with llama.cpp GGUF loading
+- [ ] Block server for remote block fetching (HTTP/gRPC)
+- [ ] Runtime compressed loading (research phase — keeping blocks compressed in memory)
 
-## v0.8 -- Advanced Compression
+### Performance
 
-More sophisticated compression strategies:
+- [ ] Lazy tensor loading (only decompress when first accessed)
+- [ ] Tensor caching (keep recently used tensors decompressed)
+- [ ] Prefetching (anticipate which tensors will be needed next)
+- [ ] Benchmarks for block-level vs full-archive loading
+
+> **Important:** Block-level loading does NOT reduce inference VRAM. The decompressed tensors still occupy the same GPU memory. Runtime compressed loading (keeping blocks compressed in CPU RAM) is future research.
+
+## v0.8 — Advanced Compression
+
+More sophisticated compression strategies for specific use cases:
+
+### Delta Compression
 
 - [ ] Delta compression for LoRA adapters relative to base models
-- [ ] GGUF block-level compression (skip already-quantized blocks entirely)
-- [ ] Optimizer state compression for training checkpoints
-- [ ] Weight sharing detection across model files
-- [ ] Cross-file deduplication
-- [ ] Dictionary-trained zstd for similar tensor blocks
+- [ ] Delta compression between training checkpoints
 - [ ] XOR delta encoding for adjacent weight matrix rows
+- [ ] Delta manifest schema (v5 format)
+
+### GGUF-Specific
+
+- [ ] GGUF block-level compression (skip already-quantized blocks entirely)
+- [ ] GGUF metadata section compression (highly compressible KV pairs)
+- [ ] GGUF vocabulary/tokenizer data optimization
+
+### Optimizer State
+
+- [ ] Optimizer state compression for training checkpoints
+- [ ] Adam state separation (momentum, variance, step count)
+- [ ] Sparse optimizer state handling
+
+### Cross-File Optimization
+
+- [ ] Weight sharing detection across model files
+- [ ] Cross-file deduplication (identical blocks stored once)
+- [ ] Dictionary-trained zstd for similar tensor blocks
+- [ ] Cross-model compression (shared vocabulary, shared embeddings)
+
+## v0.9 — Encryption and Authentication
+
+Security features for production deployments:
+
+- [ ] Symmetric encryption of archive contents (AES-256-GCM)
+- [ ] Asymmetric encryption (recipient-specific archives)
+- [ ] Archive signing (Ed25519 or RSA signatures)
+- [ ] Signature verification in `kmc verify`
+- [ ] Key management integration (environment variables, key files, key servers)
+- [ ] Encrypted manifest with selective disclosure
+
+## v1.0 — Production Release
+
+The first stable release with all major features and documented behavior:
+
+- [ ] Stable API guarantee (no breaking changes without major version bump)
+- [ ] Complete documentation coverage
+- [ ] Performance benchmarks against competing tools
+- [ ] Security audit (formal or community)
+- [ ] Full Kimari ecosystem integration
+- [ ] Python 3.10-3.14 support matrix tested
+- [ ] Windows, macOS, Linux support tested
+- [ ] Migration guide from v0.x to v1.0
+
+---
 
 ## Future Research Directions
 
-These are exploratory areas that may or may not be incorporated:
+These are exploratory areas that may or may not be incorporated into KMC:
 
-- **Neural compression**: Using small neural networks to compress weight matrices more efficiently than general-purpose codecs.
-- **Quantization-aware compression**: Exploiting the structure of quantized weights (e.g., GGUF quantization levels) for better compression.
-- **Distributed compression**: Coordinating compression across multiple nodes for federated learning scenarios.
-- **Incremental archives**: Supporting efficient updates to existing archives without full repack.
-- **Compressed KV cache**: Investigating whether compression techniques can reduce the memory footprint of KV caches during inference.
+- **Neural compression**: Using small neural networks to compress weight matrices more efficiently than general-purpose codecs. Research suggests that learned compression can outperform hand-crafted codecs on specific data distributions.
+
+- **Quantization-aware compression**: Exploiting the structure of quantized weights (e.g., GGUF quantization levels, GPTQ group sizes) for better compression. Quantized data has specific statistical properties that general-purpose codecs don't exploit.
+
+- **Distributed compression**: Coordinating compression across multiple nodes for federated learning scenarios. Each node compresses its local model, and the archives are merged or compared centrally.
+
+- **Incremental archives**: Supporting efficient updates to existing archives without full repack. Only changed blocks would need to be recompressed and the manifest updated.
+
+- **Compressed KV cache**: Investigating whether compression techniques can reduce the memory footprint of KV caches during inference. This is distinct from model weight compression and requires runtime integration.
+
+- **Weight pruning integration**: Detecting and exploiting sparse weight patterns (zeros, near-zeros) for better compression. Sparse tensors can be stored more efficiently by separating indices from values.
+
+- **Model merging**: Supporting efficient storage of merged models (e.g., model soup, task vectors) by storing only the differences from base models.
