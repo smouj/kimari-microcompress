@@ -19,13 +19,13 @@ from pathlib import Path, PurePosixPath
 
 from .codecs import CodecId, compress_block, decompress_block
 from .hashing import sha256_block, sha256_file
-from .manifest import BlockEntry, FileEntry, KMCManifest
+from .manifest import BlockEntry, FileEntry, KMCManifest, TensorEntry
 
 KMC_MAGIC = b"KMC\x00\x01\x00\x00\x00"
 KMC_MAGIC_LEN = 8
 MANIFEST_LEN_FMT = ">Q"  # 8-byte big-endian unsigned
 MANIFEST_LEN_SIZE = struct.calcsize(MANIFEST_LEN_FMT)
-KMC_FORMAT_VERSION = 1
+KMC_FORMAT_VERSION = 1  # Archive binary format version (manifest has its own version)
 
 DEFAULT_BLOCK_SIZE = 256 * 1024  # 256 KiB
 MAX_MANIFEST_SIZE = 100 * 1024 * 1024  # 100 MB safety limit
@@ -231,6 +231,139 @@ def validate_manifest(manifest: KMCManifest) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Tensor-aware helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_safetensors_tensor_entries(path: Path) -> tuple[list[TensorEntry], list[str], int]:
+    """Try to read safetensors tensor metadata from a file.
+
+    Returns (tensor_entries, dtype_summary, tensor_count).
+    Returns empty lists/zero if the file is not safetensors or metadata
+    cannot be read.
+    """
+    if path.suffix.lower() != ".safetensors":
+        return [], [], 0
+
+    try:
+        from .formats.safetensors import read_safetensors_info
+
+        info = read_safetensors_info(path)
+        entries = [
+            TensorEntry(
+                name=t.name,
+                dtype=t.dtype,
+                shape=t.shape,
+                byte_offset=t.byte_offset,
+                byte_size=t.byte_size,
+            )
+            for t in info.tensors
+        ]
+        return entries, info.dtypes, info.tensor_count
+    except (ValueError, OSError, KeyError):
+        return [], [], 0
+
+
+def _compute_tensor_aware_block_boundaries(
+    file_size: int,
+    block_size: int,
+    tensor_entries: list[TensorEntry],
+    header_size: int = 0,
+) -> list[int]:
+    """Compute block split points that try to align with tensor boundaries.
+
+    When tensor metadata is available, we attempt to avoid splitting a tensor
+    across two blocks when it fits within a single block or when the waste
+    from alignment is small (< 10% of block_size).
+
+    If no tensor entries are provided, falls back to simple block_size intervals.
+
+    Returns a list of byte offsets where blocks should start.
+    """
+    if not tensor_entries:
+        # No tensor info: simple fixed-size blocks
+        boundaries = []
+        offset = 0
+        while offset < file_size:
+            boundaries.append(offset)
+            offset += block_size
+        return boundaries
+
+    # Compute ideal boundaries based on tensor start offsets
+    # The data region starts after the safetensors header
+
+    boundaries: list[int] = []
+    current_block_start = 0  # Relative to data start
+
+    for tensor in sorted(tensor_entries, key=lambda t: t.byte_offset):
+        tensor_start = tensor.byte_offset  # Already relative to data start
+
+        if tensor_start < current_block_start:
+            # Tensor starts within current block (overlapping)
+            continue
+
+        # If the gap between current_block_start and tensor_start is small
+        # enough to be reasonable waste, snap to tensor boundary
+        gap = tensor_start - current_block_start
+
+        if gap > 0 and gap <= block_size:
+            # Check if snapping is worth it (don't waste more than 10% of block)
+            if gap <= block_size * 0.1:
+                # Start a new block at the tensor boundary
+                if boundaries:
+                    boundaries.append(tensor_start)
+                else:
+                    # First block starts at 0, but if tensor starts later,
+                    # we still start at 0 and let the next block align
+                    if tensor_start < block_size:
+                        boundaries.append(0)
+                    else:
+                        boundaries.append(0)
+                        boundaries.append(tensor_start)
+                current_block_start = tensor_start
+            else:
+                # Not worth snapping, fill the gap with a block
+                boundaries.append(current_block_start)
+                current_block_start += block_size
+                # Then try to align again
+                if tensor_start > current_block_start:
+                    boundaries.append(tensor_start)
+                    current_block_start = tensor_start
+        elif gap > block_size:
+            # Large gap: fill with regular blocks, then snap to tensor
+            while current_block_start + block_size <= tensor_start:
+                boundaries.append(current_block_start)
+                current_block_start += block_size
+            # Snap to tensor
+            if current_block_start < tensor_start:
+                boundaries.append(current_block_start)
+                current_block_start = tensor_start
+                if current_block_start < file_size:
+                    boundaries.append(tensor_start)
+        else:
+            # gap == 0: already aligned
+            if not boundaries or current_block_start == 0:
+                boundaries.append(current_block_start)
+            current_block_start = max(current_block_start, tensor_start)
+
+    # Fill remaining with regular blocks
+    while current_block_start < file_size:
+        boundaries.append(current_block_start)
+        current_block_start += block_size
+
+    # Deduplicate and sort
+    seen = set()
+    result = []
+    for b in boundaries:
+        if b not in seen and b < file_size:
+            seen.add(b)
+            result.append(b)
+    result.sort()
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Pack
 # ---------------------------------------------------------------------------
 
@@ -240,6 +373,7 @@ def pack(
     output: Path,
     block_size: int = DEFAULT_BLOCK_SIZE,
     level: int = 3,
+    tensor_aware: bool = False,
 ) -> None:
     """Pack a directory or single file into a .kmc archive.
 
@@ -248,6 +382,8 @@ def pack(
         output: Output .kmc file path.
         block_size: Block size in bytes (default 256 KiB).
         level: Compression level (codec-dependent).
+        tensor_aware: If True, attempt to align blocks to tensor boundaries
+            for safetensors files and record tensor metadata in the manifest.
     """
     source = Path(source).resolve()
     output = Path(output).resolve()
@@ -277,17 +413,54 @@ def pack(
 
         file_hash = sha256_file(fpath, block_size)
         file_size = fpath.stat().st_size
+
+        # Try to get tensor metadata if tensor_aware mode
+        tensor_entries: list[TensorEntry] = []
+        dtype_summary: list[str] = []
+        tensor_count = 0
+
+        if tensor_aware:
+            tensor_entries, dtype_summary, tensor_count = _get_safetensors_tensor_entries(fpath)
+
         file_entry = FileEntry(
             path=rel_str,
             original_size=file_size,
             hash=file_hash,
             block_size=block_size,
+            tensor_count=tensor_count,
+            dtype_summary=dtype_summary,
+            tensor_entries=tensor_entries,
         )
 
+        # Compute block boundaries
+        if tensor_aware and tensor_entries:
+            # Get header size for offset calculation
+            header_size = 0
+            try:
+                from .formats.safetensors import read_safetensors_info
+
+                info = read_safetensors_info(fpath)
+                header_size = info.header_size
+            except (ValueError, OSError):
+                pass
+
+            block_starts = _compute_tensor_aware_block_boundaries(
+                file_size, block_size, tensor_entries, header_size
+            )
+        else:
+            # Standard fixed-size blocks
+            block_starts = list(range(0, file_size, block_size))
+
         with open(fpath, "rb") as f:
-            block_index = 0
-            while True:
-                chunk = f.read(block_size)
+            for block_index, block_start in enumerate(block_starts):
+                # Determine how much to read for this block
+                if block_index + 1 < len(block_starts):
+                    chunk_size = block_starts[block_index + 1] - block_start
+                else:
+                    chunk_size = file_size - block_start
+
+                f.seek(block_start)
+                chunk = f.read(chunk_size)
                 if not chunk:
                     break
 
@@ -307,8 +480,6 @@ def pack(
 
                 manifest.total_original_size += compressed.original_size
                 manifest.total_compressed_size += compressed.compressed_size
-
-                block_index += 1
 
         manifest.files.append(file_entry)
 
@@ -426,11 +597,8 @@ def verify_full(archive: Path) -> VerificationReport:
     report.restored_size = manifest.total_original_size
 
     # Check format version
-    if manifest.version != KMC_FORMAT_VERSION:
-        report.warnings.append(
-            f"Format version mismatch: archive is v{manifest.version}, "
-            f"expected v{KMC_FORMAT_VERSION}"
-        )
+    if manifest.version not in (1, 2):
+        report.warnings.append(f"Unknown manifest version: v{manifest.version}, expected v1 or v2")
 
     # Validate manifest structure
     structural_errors = validate_manifest(manifest)

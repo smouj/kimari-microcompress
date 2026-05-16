@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kimari-microcompress"
-version = "0.2.0"
+version = "0.3.0-alpha"
 description = "Reversible lossless compression for AI models: safetensors, GGUF, checkpoints, LoRA/QLoRA and future block-loading."
 readme = "README.md"
 license = {text = "MIT"}
@@ -30,9 +30,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+safetensors = [
+    "safetensors>=0.4.0",
+]
+zipnn = [
+    "zipnn>=0.3.0",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4.0",
+]
+all = [
+    "kimari-microcompress[safetensors,zipnn]",
 ]
 
 [project.scripts]
@@ -47,6 +56,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

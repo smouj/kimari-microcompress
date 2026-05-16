@@ -14,7 +14,11 @@ from kmc.archive import (
     validate_manifest,
     verify_full,
 )
-from kmc.manifest import BlockEntry, FileEntry, KMCManifest
+from kmc.manifest import (  # noqa: I001 - separate import block for clarity
+    BlockEntry,
+    FileEntry,
+    KMCManifest,
+)
 
 
 # ---------------------------------------------------------------------------

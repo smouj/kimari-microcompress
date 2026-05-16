@@ -16,6 +16,17 @@
 - **No fixed compression ratios should be assumed without real benchmarks.** Results vary significantly by model format, data type, and content. Synthetic benchmarks do not represent real-world ratios.
 - **KMC is not a replacement for quantization.** If you need smaller models for inference, use quantization (GGUF Q4_K, GPTQ, AWQ, etc.). KMC is complementary: it compresses the already-quantized files for storage/transfer.
 
+## KMC v0.3.0-alpha Focus
+
+This release focuses on real safetensors support and professional tooling:
+
+- **Real safetensors metadata inspection** — Read tensor names, dtypes, shapes, and byte offsets without loading weights
+- **Tensor-aware manifest entries** — Block boundaries aligned to tensor boundaries with `--tensor-aware`
+- **Optional ZipNN benchmark comparison** — Measure against ZipNN with fair, reproducible results
+- **Minimal GGUF parser** — Header parsing with version, endianness, and tensor count detection
+- **Kimari CLI adapter preparation** — Clean integration layer for `kimari compress/decompress/verify-compress/bench-compress`
+- **Hugging Face workflow documentation** — Complete guide for compressing models from Hugging Face Hub
+
 ## Overview
 
 Kimari MicroCompress (KMC) is an experimental tool for **lossless, reversible compression** of AI model files. It focuses on **storage, transfer, verification, and packaging** without modifying the original weights. The approach is grounded in the observation that AI model files — particularly `safetensors` and quantized formats — contain significant redundancy that general-purpose compression tools don't exploit optimally.
@@ -27,24 +38,31 @@ Kimari MicroCompress (KMC) is an experimental tool for **lossless, reversible co
 | Feature | Status |
 |---------|--------|
 | `kmc pack` — Compress files/directories | ✅ Working |
+| `kmc pack --tensor-aware` — Tensor-aware block alignment | ✅ Working |
 | `kmc unpack` — Decompress archives (path-safe) | ✅ Working |
 | `kmc verify` — Full verification report | ✅ Working |
-| `kmc inspect` — View archive manifest + AI model inspection | ✅ Working |
+| `kmc inspect` — AI model inspection with tensor metadata | ✅ Working |
+| `kmc inspect --json` — JSON output for scripting | ✅ Working |
+| `kmc inspect --tensors` — Detailed tensor information | ✅ Working |
 | `kmc bench` — Benchmark with codec comparison | ✅ Working |
+| `kmc bench --compare-zipnn` — ZipNN comparison | ✅ Working |
 | `.kmc` archive format with JSON manifest | ✅ Working |
 | zstd / zlib / raw codec selection | ✅ Working |
 | SHA-256 per-file and per-block hashing | ✅ Working |
 | 256 KiB micro-blocks (configurable) | ✅ Working |
 | AI format detection (safetensors, GGUF, LoRA, shards, etc.) | ✅ Working |
-| safetensors tensor metadata parsing | ✅ Working |
-| GGUF header parsing | ✅ Working |
+| safetensors real tensor metadata (names, shapes, dtypes, offsets) | ✅ Working |
+| safetensors shard detection | ✅ Working |
+| LoRA/PEFT adapter detection with rank and target modules | ✅ Working |
+| GGUF header parsing (version, endianness, tensor count) | ✅ Working |
 | Path traversal protection in unpack | ✅ Working |
 | Manifest validation (duplicates, codecs, sizes) | ✅ Working |
 | Full verification report with block/file hash checks | ✅ Working |
-| Benchmark JSON export | ✅ Working |
+| Benchmark JSON export with environment metadata | ✅ Working |
 | Kimari CLI integration adapters | ✅ Working |
+| `safetensors` optional dependency support | ✅ Working |
+| `zipnn` optional dependency support | ✅ Working |
 | Real model benchmarks | 🔜 Planned |
-| `kimari compress` CLI integration | 🔜 Planned |
 | GGUF block-level compression | 🔬 Research |
 | Block-loading (partial decompression) | 🔬 Research |
 | Checkpoint/gradients compression | 🔬 Research |
@@ -56,19 +74,33 @@ Kimari MicroCompress (KMC) is an experimental tool for **lossless, reversible co
 git clone https://github.com/smouj/kimari-microcompress.git
 cd kimari-microcompress
 pip install -e ".[dev]"
+
+# With safetensors optional dependency (better header parsing)
+pip install -e ".[safetensors]"
+
+# With ZipNN optional dependency (for benchmark comparison)
+pip install -e ".[zipnn]"
+
+# All optional dependencies
+pip install -e ".[all]"
 ```
 
 ### Requirements
 
 - Python 3.10+
-- `zstandard` (recommended, for best compression)
+- `zstandard` (required, for best compression)
 - `zlib` (built-in, used as fallback)
+- `safetensors` (optional, for enhanced header parsing)
+- `zipnn` (optional, for benchmark comparison)
 
 ## Quick Start
 
 ```bash
 # Pack a model directory
 kmc pack ./my-model ./my-model.kmc
+
+# Pack with tensor-aware mode (recommended for safetensors)
+kmc pack ./my-model ./my-model.kmc --tensor-aware
 
 # Verify integrity (full report)
 kmc verify ./my-model.kmc
@@ -77,13 +109,19 @@ kmc verify ./my-model.kmc
 kmc inspect ./my-model.kmc
 
 # Inspect AI model directory (detects formats, reads tensor metadata)
-kmc inspect ./my-model/
+kmc inspect ./my-model/ --tensors
+
+# Inspect with JSON output
+kmc inspect ./my-model/ --json
 
 # Unpack to a directory
 kmc unpack ./my-model.kmc ./restored-model/
 
 # Run benchmark with JSON output
 kmc bench ./my-model ./my-model-bench.kmc --json --output report.json
+
+# Benchmark with ZipNN comparison
+kmc bench ./my-model ./my-model-bench.kmc --compare-zipnn
 ```
 
 ## KMC Archive Format
@@ -100,6 +138,7 @@ The `.kmc` format is designed for verifiable, block-oriented storage:
 │  - version, tool info              │
 │  - file entries with paths & hashes│
 │  - block entries with codecs       │
+│  - tensor entries (v0.3+, optional)│
 │  - total sizes and ratios          │
 ├─────────────────────────────────────┤
 │ Block data: concatenated           │  Variable
@@ -129,14 +168,18 @@ See [SECURITY_MODEL.md](docs/SECURITY_MODEL.md) for the complete security model.
 ```
 src/kmc/
 ├── archive.py          # Core pack/unpack/verify with security checks
-├── benchmark.py        # Performance benchmarking with codec comparison
+├── benchmark.py        # Performance benchmarking with codec + ZipNN comparison
 ├── cli.py              # Command-line interface
 ├── codecs.py           # Compression codecs (zstd, zlib, raw)
-├── gguf.py             # GGUF format support (future)
+├── formats/
+│   ├── __init__.py     # Format module registry
+│   ├── safetensors.py  # Safetensors metadata, shards, LoRA detection
+│   └── gguf.py         # GGUF header parsing
 ├── hashing.py          # SHA-256 integrity hashing
 ├── inspector.py        # AI model format detection with metadata
-├── manifest.py         # KMC manifest (JSON metadata)
-├── tensor_inspector.py # safetensors metadata parsing
+├── manifest.py         # KMC manifest (JSON metadata with tensor entries)
+├── tensor_inspector.py # Legacy safetensors metadata (see formats/safetensors.py)
+├── gguf.py             # Legacy GGUF module (see formats/gguf.py)
 └── integrations/
     └── kimari.py       # Kimari CLI integration adapters
 ```
@@ -161,6 +204,7 @@ KMC's approach is informed by research and industry practice:
 - [Benchmark Plan](docs/BENCHMARK_PLAN.md) — Performance testing strategy
 - [Research Notes](docs/RESEARCH_NOTES.md) — Technical references
 - [Kimari Integration](docs/KIMARI_INTEGRATION.md) — Integration with Kimari CLI
+- [Hugging Face Workflow](docs/HUGGINGFACE_WORKFLOW.md) — Working with Hugging Face models
 
 ## Development
 

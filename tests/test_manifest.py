@@ -1,10 +1,10 @@
 """Tests for KMC manifest serialization/deserialization."""
 
 from kmc.manifest import (
+    KMC_MANIFEST_VERSION,
     BlockEntry,
     FileEntry,
     KMCManifest,
-    KMC_MANIFEST_VERSION,
 )
 
 

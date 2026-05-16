@@ -6,6 +6,62 @@
 2. Compare KMC against general-purpose compression tools (tar+zstd, zip).
 3. Compare against ZipNN where applicable.
 4. Provide reproducible benchmark results that inform optimization priorities.
+5. Never invent or fabricate benchmark results.
+6. Clearly distinguish between synthetic and real data benchmarks.
+
+## KMC v0.3.0-alpha Benchmark Capabilities
+
+### Core Benchmarking
+
+KMC includes a built-in benchmark system accessible via `kmc bench`:
+
+```bash
+# Basic benchmark
+kmc bench ./model ./model-bench.kmc
+
+# With JSON output
+kmc bench ./model ./model-bench.kmc --json --output report.json
+
+# With tensor-aware mode
+kmc bench ./model ./model-bench.kmc --tensor-aware
+
+# Mark data as synthetic
+kmc bench ./model ./model-bench.kmc --synthetic
+```
+
+### ZipNN Comparison
+
+```bash
+# Compare with ZipNN (if installed)
+kmc bench ./model ./model-bench.kmc --compare-zipnn
+```
+
+When ZipNN is not installed, the benchmark reports:
+```
+ZipNN: not available
+Suggestion: pip install zipnn
+```
+
+When ZipNN is installed, the benchmark measures and reports both KMC and ZipNN results side by side. **No claims of superiority are made.** The results are measurements, not marketing.
+
+### Environment Metadata
+
+All benchmark results include environment information for reproducibility:
+
+```json
+{
+  "environment": {
+    "python_version": "3.12.1",
+    "os_name": "Linux",
+    "os_version": "6.1.0",
+    "cpu": "AMD Ryzen 9 7950X",
+    "ram_gb": 64.0,
+    "kmc_version": "0.3.0-alpha",
+    "zipnn_version": "0.3.0",
+    "zstd_available": true
+  }
+}
+```
 
 ## Benchmark Targets
 
@@ -56,7 +112,7 @@ Peak RSS during pack and unpack operations, measured via `resource.getrusage()` 
 
 ### Verification Time
 
-Time to verify an archive without decompressing (should be I/O-bound, not CPU-bound).
+Time to verify an archive including decompression for hash verification.
 
 ## Benchmark Procedure
 
@@ -68,6 +124,7 @@ Download the model files using Hugging Face `from_pretrained` or direct download
 
 ```bash
 kmc pack ./model ./model.kmc -l 3
+kmc pack ./model ./model.kmc -l 3 --tensor-aware
 kmc pack ./model ./model-l9.kmc -l 9
 ```
 
@@ -79,7 +136,14 @@ tar cf - ./model | zstd -9 -o model-l9.tar.zst
 zip -r model.zip ./model
 ```
 
-### 4. Verify and Unpack
+### 4. ZipNN Comparison
+
+```bash
+pip install zipnn
+kmc bench ./model ./model-bench.kmc --compare-zipnn --json --output bench-results.json
+```
+
+### 5. Verify and Unpack
 
 ```bash
 kmc verify ./model.kmc
@@ -87,7 +151,7 @@ kmc unpack ./model.kmc ./restored/
 diff -r ./model ./restored/
 ```
 
-### 5. Record Results
+### 6. Record Results
 
 For each combination of model, tool, and compression level, record:
 - Original size
@@ -97,10 +161,11 @@ For each combination of model, tool, and compression level, record:
 - Unpack time
 - Verify time
 - Peak memory usage
+- Environment metadata
 
-### 6. Compare
+### 7. Compare
 
-Generate comparison tables and charts showing KMC vs. baselines.
+Generate comparison tables and charts showing KMC vs. baselines vs. ZipNN.
 
 ## Expected Results
 
@@ -111,6 +176,8 @@ Based on ZipNN's published results and the nature of AI model weights:
 - **LoRA adapters**: Expected 40-60% compression, as low-rank matrices have significant structure.
 - **PyTorch .bin**: Expected 30-50%, similar to safetensors, but with additional pickle overhead that may not compress as well.
 
+**These are expectations, not guarantees.** Actual results will be published once real benchmarks are completed.
+
 ## Automation
 
 Benchmarks should be automated via a script that:
@@ -120,3 +187,22 @@ Benchmarks should be automated via a script that:
 4. Generates a summary report (Markdown + charts).
 
 Future CI integration could run benchmarks on a schedule and track performance regressions.
+
+## Important Notes
+
+### No Fabricated Results
+
+KMC will never invent or fabricate benchmark results. If a measurement is not available (e.g., ZipNN is not installed), the output will clearly indicate that the measurement was not taken, not substitute a fake number.
+
+### Fair Comparison
+
+When comparing with ZipNN:
+- Use the same input data and compression level where possible.
+- Report both tools' versions.
+- Report the full environment (CPU, RAM, OS).
+- Acknowledge when ZipNN performs better — this is a measurement, not a competition.
+- Note that KMC and ZipNN may optimize for different things (KMC for block-level access, ZipNN for maximum ratio).
+
+### Synthetic Data Warning
+
+Synthetic data benchmarks (using random or repetitive test data) produce results that are not representative of real-world compression. All synthetic benchmarks are clearly marked with `synthetic: true` in JSON output.

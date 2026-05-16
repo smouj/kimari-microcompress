@@ -10,8 +10,10 @@ These are **real, documented limitations** of the current KMC implementation. Th
 4. **GGUF block-aware compression is future work.** GGUF files are detected and their headers are parsed, but format-specific compression strategies (e.g., skipping already-quantized blocks) are not yet implemented.
 5. **No fixed compression ratios.** Results depend heavily on model format, data type, and content. Synthetic benchmarks produce misleadingly high ratios and should not be used as references.
 6. **KMC is not quantization.** If you need smaller models for inference, use quantization (GGUF Q4_K, GPTQ, AWQ, etc.). KMC is complementary: it compresses files for storage and transfer.
+7. **Tensor-aware mode is structural, not algorithmic.** The `--tensor-aware` flag aligns block boundaries to tensor boundaries but does not yet implement tensor-specific codecs (e.g., sign/exponent/mantissa separation for BF16/FP16). That is planned for v0.4.
+8. **GGUF tensor metadata is not yet parsed.** The GGUF parser reads the header (magic, version, tensor count, KV count) but does not parse individual tensor descriptors or metadata values. Full parsing is planned for v0.5.
 
-## Phase 1: Foundation (v0.1.0) — Completed
+## v0.1 — MVP Archive
 
 The initial release establishes the core infrastructure:
 
@@ -27,12 +29,12 @@ The initial release establishes the core infrastructure:
 - [x] Basic roundtrip and manifest tests
 - [x] CI with GitHub Actions (pytest + ruff)
 
-## Phase 2: Hardening (v0.2.0) — Current
+## v0.2 — Security + Verification + Benchmark
 
 Focus on security, robustness, and realistic testing:
 
 - [x] Harden `unpack()` with `safe_join_extract_path()` function
-- [x] Comprehensive path traversal tests (null bytes, control chars, symlinks, absolute paths, `..` components)
+- [x] Comprehensive path traversal tests
 - [x] Manifest size limits to prevent DoS (100 MB max)
 - [x] Manifest validation: duplicate paths, unsupported codecs, size mismatches
 - [x] Full verification report (`verify_full()`) with structured output
@@ -44,62 +46,80 @@ Focus on security, robustness, and realistic testing:
 - [x] Enhanced inspector: LoRA adapters, tokenizer files, config files, model shards
 - [x] safetensors real tensor metadata (names, shapes, dtypes, param counts)
 - [x] GGUF header: version, tensor count, metadata KV count
-- [x] Kimari CLI integration adapters (`src/kmc/integrations/kimari.py`)
+- [x] Kimari CLI integration adapters
 - [x] Documented limitations in README and ROADMAP
-- [ ] Add decompressed size limits to prevent zip bombs
-- [ ] Add property-based testing with Hypothesis
-- [ ] Test with corrupted archives (fuzzing)
-- [ ] Create real benchmarks with small models (e.g., GPT-2 from Hugging Face)
-- [ ] Add `--verbose` and `--quiet` flags to CLI
-- [ ] Support stdin/stdout for pipe-friendly workflows
-- [ ] Add progress bars for large archives
 
-## Phase 3: Performance (v0.3.0)
+## v0.3 — Safetensors + ZipNN Comparison + GGUF Parser (Current)
 
-Optimize throughput and resource usage:
+Real safetensors support, ZipNN benchmark comparison, and minimal GGUF parser:
 
-- [ ] Parallel block compression/decompression with `concurrent.futures`
-- [ ] Memory-mapped archive reading for large files
-- [ ] Streaming pack/unpack for minimal memory footprint
-- [ ] Benchmark against `tar.zst`, `zip`, and ZipNN
-- [ ] Profile and optimize hot paths
-- [ ] Add compression level presets (fast/balanced/max)
+- [x] Dedicated `src/kmc/formats/safetensors.py` module
+- [x] Read safetensors header without loading weights
+- [x] Extract tensor metadata: name, dtype, shape, offsets, byte size
+- [x] Detect sharded models (`model-NNNN-of-MMMM.safetensors`)
+- [x] Detect LoRA/PEFT adapters with rank and target modules
+- [x] Graceful degradation when `safetensors` package is not installed
+- [x] Tensor-aware packing mode (`--tensor-aware`)
+- [x] Tensor entries in manifest (v2 manifest format)
+- [x] Backward compatibility with v0.2 `.kmc` archives
+- [x] `kmc inspect --json` and `kmc inspect --tensors` CLI flags
+- [x] Directory-level model inspection (detected type, sharding, LoRA, etc.)
+- [x] ZipNN benchmark comparison (`--compare-zipnn`)
+- [x] Environment metadata in benchmark output (Python, OS, CPU, RAM, versions)
+- [x] No invented benchmarks or superiority claims
+- [x] Dedicated `src/kmc/formats/gguf.py` module with endianness detection
+- [x] GGUF header: magic, version, endianness, tensor count, KV count, file size
+- [x] Synthetic GGUF test files
+- [x] Kimari CLI adapter with `tensor_aware` and `compare_zipnn` support
+- [x] Hugging Face workflow documentation
+- [x] Updated README, ROADMAP, ARCHITECTURE, BENCHMARK_PLAN
 
-## Phase 4: Format-Aware Compression (v0.4.0)
+## v0.4 — Tensor-Aware Block Codec Experiments
 
-Leverage knowledge of AI model formats for better compression:
+Real tensor-specific compression algorithms:
 
-- [ ] Real safetensors support: align block boundaries with tensor boundaries
-- [ ] Skip already-compressed quantized blocks in GGUF
+- [ ] BF16/FP16 sign/exponent/mantissa separation codec
+- [ ] Per-dtype compression strategies
+- [ ] Block-level codec selection based on tensor dtype
+- [ ] Benchmark tensor-aware codecs against generic compression
+- [ ] Tests with small real models (GPT-2, BERT-base)
+- [ ] Public reproducible comparison against ZipNN
+
+## v0.5 — LoRA/Checkpoint Compression Workflows
+
+Specialized compression for adapters and training artifacts:
+
 - [ ] Delta compression for LoRA adapters relative to base models
+- [ ] Checkpoint/gradients compression
+- [ ] GGUF tensor metadata parsing
+- [ ] GGUF block-aware compression (skip already-quantized blocks)
+- [ ] Optimizer state compression for training checkpoints
 - [ ] Weight sharing detection across model files
-- [ ] Format-specific compression hints in manifest
-- [ ] Benchmark against ZipNN
 
-## Phase 5: Kimari Integration (v0.5.0)
+## v0.6 — Kimari CLI Integration
 
-Integration with the Kimari ecosystem:
+Full integration with the Kimari ecosystem:
 
-- [ ] `kimari compress` command that wraps KMC
+- [ ] `kimari compress` command in Kimari CLI
+- [ ] `kimari decompress` command
+- [ ] `kimari verify-compress` command
+- [ ] `kimari bench-compress` command
+- [ ] Shared configuration (block size, compression level)
+- [ ] Progress reporting integration
 - [ ] KimariDB storage backend integration
-- [ ] Archive cataloging and metadata search
-- [ ] Integration with Hugging Face Hub for download-cache-verify workflow
-- [ ] Registry of pre-compressed model archives
-- [ ] Documentation for Hugging Face integration
 
-## Phase 6: Advanced Features (v1.0.0)
+## v0.7 — Experimental Loader/Runtime Work
+
+Block-level loading and runtime integration:
 
 - [ ] Block-level loading (partial decompression on demand)
 - [ ] Block server for remote block fetching
-- [ ] Checkpoint/gradients compression for distributed training
-- [ ] Encrypted archives for sensitive models
-- [ ] Archive signing and verification
-- [ ] Multi-part archives for very large models
-- [ ] Python API for programmatic access (beyond CLI)
-- [ ] C/Rust extension for core compression operations
-- [ ] Minimum GGUF parser for block-level access
+- [ ] Memory-mapped archive reading for large files
+- [ ] Streaming pack/unpack for minimal memory footprint
+- [ ] Python API for programmatic block access
+- [ ] Integration with model loading frameworks
 
-## Research Directions
+## Future Research Directions
 
 These are exploratory areas that may or may not be incorporated:
 
@@ -107,4 +127,4 @@ These are exploratory areas that may or may not be incorporated:
 - **Quantization-aware compression**: Exploiting the structure of quantized weights (e.g., GGUF quantization levels) for better compression.
 - **Distributed compression**: Coordinating compression across multiple nodes for federated learning scenarios.
 - **Incremental archives**: Supporting efficient updates to existing archives without full repack.
-- **Compressed KV cache**: Investigating whether compression techniques can reduce the memory footprint of KV caches during inference (distinct from model file compression).
+- **Compressed KV cache**: Investigating whether compression techniques can reduce the memory footprint of KV caches during inference.

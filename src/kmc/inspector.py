@@ -1,9 +1,8 @@
 """AI model format inspector: detect safetensors, GGUF, LoRA, shards, and more.
 
 Detects model formats by examining file magic bytes, structure, and naming
-conventions. For safetensors, attempts to read real tensor metadata when
-the format is available. For GGUF, reads header information. Degrades
-gracefully when dependencies are unavailable.
+conventions. For safetensors, reads real tensor metadata. For GGUF, reads
+header information. Degrades gracefully when dependencies are unavailable.
 """
 
 from __future__ import annotations
@@ -66,9 +65,55 @@ def _read_magic(path: Path, n: int = 8) -> bytes:
 def _check_safetensors(path: Path) -> InspectionResult | None:
     """Check if a file is a safetensors file and read tensor metadata.
 
-    safetensors format: first 8 bytes are the header length as a little-endian
-    uint64, followed by a JSON header that starts with '{'.
+    Uses the dedicated formats.safetensors module when available,
+    with a pure-Python fallback for header parsing.
     """
+    try:
+        from .formats.safetensors import read_safetensors_info
+
+        info = read_safetensors_info(path)
+
+        if not info.available or info.tensor_count == 0:
+            return None
+
+        tensors = [
+            TensorMeta(
+                name=t.name,
+                dtype=t.dtype,
+                shape=t.shape,
+                byte_offset=t.byte_offset,
+                byte_size=t.byte_size,
+            )
+            for t in info.tensors
+        ]
+
+        largest = max(tensors, key=lambda t: t.byte_size) if tensors else None
+
+        return InspectionResult(
+            path=path,
+            format=ModelFormat.SAFETENSORS,
+            details=(
+                f"safetensors: {info.tensor_count} tensors, "
+                f"{info.total_params:,} params, "
+                f"dtypes=[{', '.join(info.dtypes)}]"
+            ),
+            file_size=info.file_size,
+            tensors=tensors,
+            extra={
+                "total_params": info.total_params,
+                "dtypes": info.dtypes,
+                "largest_tensor": largest.name if largest else None,
+                "header_size": info.header_size,
+                "is_shard": info.is_shard,
+                "shard_index": info.shard_index,
+                "shard_total": info.shard_total,
+            },
+        )
+
+    except (ValueError, OSError, ImportError):
+        pass
+
+    # Fallback: raw header parsing
     try:
         file_size = path.stat().st_size
         with open(path, "rb") as f:
@@ -147,7 +192,35 @@ def _check_safetensors(path: Path) -> InspectionResult | None:
 
 
 def _check_gguf(path: Path) -> InspectionResult | None:
-    """Check if a file is a GGUF file and read header info."""
+    """Check if a file is a GGUF file and read header info.
+
+    Uses the dedicated formats.gguf module when available.
+    """
+    try:
+        from .formats.gguf import read_gguf_info
+
+        info = read_gguf_info(path)
+
+        return InspectionResult(
+            path=path,
+            format=ModelFormat.GGUF,
+            details=(
+                f"GGUF v{info.version}: {info.tensor_count} tensors, "
+                f"{info.metadata_kv_count} metadata keys"
+            ),
+            file_size=info.file_size,
+            extra={
+                "version": info.version,
+                "tensor_count": info.tensor_count,
+                "kv_count": info.metadata_kv_count,
+                "endianness": info.endianness,
+                "note": "Block-aware GGUF compression is future research",
+            },
+        )
+    except (ValueError, OSError, ImportError):
+        pass
+
+    # Fallback
     try:
         file_size = path.stat().st_size
         magic_bytes = _read_magic(path, 4)
@@ -254,6 +327,43 @@ def _check_lora_adapter(path: Path) -> InspectionResult | None:
     # If it's a safetensors, check for lora tensor names
     if path.suffix.lower() == ".safetensors":
         try:
+            from .formats.safetensors import read_safetensors_info
+
+            info = read_safetensors_info(path)
+
+            if info.is_lora or is_lora_name:
+                lora_tensors = [t.name for t in info.tensors if "lora" in t.name.lower()]
+                return InspectionResult(
+                    path=path,
+                    format=ModelFormat.LORA_ADAPTER,
+                    details=(
+                        f"LoRA adapter: {info.tensor_count} tensors, "
+                        f"{len(lora_tensors)} LoRA tensors"
+                        + (f", rank={info.lora_rank}" if info.lora_rank else "")
+                    ),
+                    file_size=info.file_size,
+                    tensors=[
+                        TensorMeta(
+                            name=t.name,
+                            dtype=t.dtype,
+                            shape=t.shape,
+                            byte_offset=t.byte_offset,
+                            byte_size=t.byte_size,
+                        )
+                        for t in info.tensors
+                    ],
+                    extra={
+                        "lora_tensors": lora_tensors[:20],
+                        "lora_rank": info.lora_rank,
+                        "target_modules": info.target_modules,
+                        "base_model_reference": info.base_model_reference,
+                    },
+                )
+        except (ValueError, OSError, ImportError):
+            pass
+
+        # Fallback: raw header check
+        try:
             with open(path, "rb") as f:
                 header_len_bytes = f.read(8)
                 if len(header_len_bytes) < 8:
@@ -336,7 +446,7 @@ def _check_config(path: Path) -> InspectionResult | None:
 def _check_model_index(path: Path) -> InspectionResult | None:
     """Check if a file is a model index (sharded models)."""
     name = path.name.lower()
-    if name in ("model_index.json", "models.json"):
+    if name in ("model_index.json", "models.json", "model.safetensors.index.json"):
         return InspectionResult(
             path=path,
             format=ModelFormat.MODEL_INDEX,

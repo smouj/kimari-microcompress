@@ -14,15 +14,19 @@ Kimari MicroCompress is built on a set of core principles that guide every desig
 
 5. **Manifest-first metadata**: All metadata is stored in a single JSON manifest at the beginning of the archive. This allows tools to inspect the archive without decompressing any data, and makes the format human-readable and debuggable.
 
+6. **Tensor-aware extension**: When `--tensor-aware` mode is enabled, block boundaries are aligned to tensor boundaries in safetensors files, and tensor metadata is recorded in the manifest. This is a structural preparation for future tensor-specific codecs.
+
+7. **Optional dependencies**: Features that require external packages (safetensors, zipnn) degrade gracefully when those packages are not installed. Core functionality never depends on optional packages.
+
 ## Module Structure
 
 ### `archive.py` — Core Operations
 
 The `archive` module implements the three fundamental operations on `.kmc` archives:
 
-- **`pack(source, output)`**: Reads files from the source, splits them into blocks, compresses each block, computes hashes, and writes the complete archive including the manifest.
+- **`pack(source, output, tensor_aware=False)`**: Reads files from the source, splits them into blocks (optionally aligned to tensor boundaries), compresses each block, computes hashes, and writes the complete archive including the manifest. When `tensor_aware=True`, safetensors files are inspected for tensor metadata and block boundaries are adjusted to avoid splitting tensors across blocks where reasonable.
 - **`unpack(archive, output_dir)`**: Reads the manifest, then for each file entry, reads and decompresses blocks in order, verifies hashes, and writes the reconstructed files. Includes path traversal protection.
-- **`verify(archive)`**: Reads the manifest and checks every block hash without decompressing. This is fast and sufficient to confirm archive integrity.
+- **`verify(archive)` / `verify_full(archive)`**: Reads the manifest and checks every block hash and file hash. `verify()` returns a list of errors; `verify_full()` returns a structured `VerificationReport`.
 
 The archive format uses a simple sequential layout: magic bytes, manifest length, manifest, then block data. Offsets in the manifest point directly to block positions within the file, enabling random access to individual blocks.
 
@@ -36,12 +40,14 @@ Codec identifiers are stored as strings in the manifest (`"zstd"`, `"zlib"`, `"r
 
 ### `manifest.py` — Archive Metadata
 
-The manifest uses Python dataclasses with a clear hierarchy: `KMCManifest` contains `FileEntry` objects, each of which contains `BlockEntry` objects. The manifest is serialized to JSON for human readability and forward compatibility.
+The manifest uses Python dataclasses with a clear hierarchy: `KMCManifest` contains `FileEntry` objects, each of which contains `BlockEntry` objects and optionally `TensorEntry` objects. The manifest is serialized to JSON for human readability and forward compatibility.
 
 Key design choices:
 - POSIX-style paths are used for cross-platform compatibility.
-- The manifest version field allows future format changes to be handled gracefully.
+- The manifest version field distinguishes between v1 (original) and v2 (tensor-aware) formats.
 - The `tool` and `tool_version` fields enable provenance tracking.
+- `TensorEntry` records tensor name, dtype, shape, byte_offset, and byte_size for safetensors files.
+- v2 manifests are backward-compatible with v1 readers (tensor fields default to empty/zero).
 
 ### `hashing.py` — Integrity Verification
 
@@ -49,26 +55,49 @@ The hashing module provides SHA-256 computation for bytes, files, and blocks. Th
 - Block hashes can be verified without decompressing (fast).
 - File hashes verify the complete reconstructed data (thorough).
 
+### `formats/safetensors.py` — Safetensors Format Support
+
+This dedicated module provides comprehensive safetensors support:
+
+- **Header parsing**: Reads the 8-byte header length prefix and JSON header without loading tensor data.
+- **Tensor metadata extraction**: For each tensor, extracts name, dtype, shape, byte_offset, and byte_size.
+- **Shard detection**: Identifies files matching `model-NNNN-of-MMMM.safetensors` and checks for `model.safetensors.index.json`.
+- **LoRA/PEFT detection**: Detects LoRA adapters by examining tensor names (lora_A, lora_B patterns) and naming conventions. Extracts rank and target modules.
+- **Graceful degradation**: If the `safetensors` package is not installed, falls back to a pure-Python header parser that reads the JSON header directly from the file.
+- **No weight loading**: No tensor data is ever loaded into memory. Only metadata is read.
+- **No pickle usage**: The module never uses pickle or any other insecure deserialization method.
+
+### `formats/gguf.py` — GGUF Format Support
+
+This module provides minimal GGUF header parsing:
+
+- **Magic detection**: Reads the 4-byte magic and determines endianness (little-endian or big-endian).
+- **Version parsing**: Reads the GGUF format version (1, 2, or 3).
+- **Header fields**: Extracts tensor_count and metadata_kv_count.
+- **No full file loading**: Only the minimum bytes needed for the header are read.
+- **No tensor metadata parsing**: Full tensor descriptor parsing is planned for a future release.
+
 ### `inspector.py` — AI Model Format Detection
 
-The inspector module identifies AI model formats by examining file magic bytes and structure:
-- **safetensors**: Detected by the 8-byte header length prefix followed by valid JSON.
-- **GGUF**: Detected by the `0x46475547` magic number.
-- **PyTorch .bin**: Detected by pickle protocol magic bytes.
-- **.pt/.ckpt**: Identified by file extension with additional validation.
+The inspector module identifies AI model formats by examining file magic bytes and structure. It uses the dedicated format modules (`formats/safetensors.py`, `formats/gguf.py`) when available, with fallbacks for when they are not. The module also provides directory-level inspection that aggregates results across all files to detect model type, sharding, LoRA adapters, and tensor summaries.
 
-This detection enables KMC to apply format-aware optimizations in the future.
+### `tensor_inspector.py` — Legacy Safetensors Metadata
 
-### `tensor_inspector.py` — safetensors Metadata
+This module provides the original safetensors header parsing functionality. It remains for backward compatibility but the primary implementation has moved to `formats/safetensors.py`. New code should use `formats.safetensors.read_safetensors_info()` instead.
 
-This module parses safetensors headers to extract tensor names, dtypes, shapes, and data offsets. This information is useful for:
-- Estimating compression potential per-tensor.
-- Understanding model structure without loading it.
-- Future block-loading features that need to know tensor boundaries.
+### `benchmark.py` — Performance Benchmarking
 
-### `gguf.py` — GGUF Format Support
+The benchmark module measures KMC performance and compares it against other tools:
 
-The GGUF module provides header parsing and format validation. Full integration (reading tensor data, block-level compression) is planned for a future release, as GGUF files are already typically stored in quantized formats where additional compression may have limited benefit.
+- **Codec comparison**: Benchmarks raw, zlib, and zstd codecs on a 1 MB sample.
+- **KMC pipeline**: Measures full pack, verify, and unpack timing.
+- **ZipNN comparison**: Optionally compares against ZipNN on compatible files (safetensors, .bin).
+- **Environment metadata**: Records Python version, OS, CPU, RAM, KMC version, and dependency versions for reproducibility.
+- **Honest reporting**: No invented benchmarks or superiority claims. Results are measurements.
+
+### `gguf.py` — Legacy GGUF Module
+
+This module provides the original GGUF header parsing functionality. The primary implementation has moved to `formats/gguf.py`. It remains for backward compatibility.
 
 ## Data Flow
 
@@ -79,7 +108,10 @@ Source files → Read in blocks → Compress each block → Compute block hash
                                     ↓
                             Select best codec (zstd/zlib/raw)
                                     ↓
+                    [Optional: Tensor-aware block boundaries]
+                                    ↓
                             Build manifest with offsets and hashes
+                            [Optional: Add tensor entries]
                                     ↓
                             Write: Magic + Manifest + Block data
 ```
@@ -102,7 +134,36 @@ Read: Magic + Manifest + Block data
             Verify file hash (SHA-256)
 ```
 
+### Tensor-Aware Pack Operation
+
+```
+Source safetensors file
+        ↓
+    Read header (JSON)
+        ↓
+    Extract tensor metadata
+    (name, dtype, shape, offsets, sizes)
+        ↓
+    Compute block boundaries
+    aligned to tensor boundaries
+        ↓
+    Compress each block
+        ↓
+    Build manifest with
+    TensorEntry records
+        ↓
+    Write archive
+```
+
 ## Future Architecture Considerations
+
+### Tensor-Specific Codecs (v0.4)
+
+With tensor metadata available in the manifest, future versions can implement codecs that exploit the structure of specific data types:
+
+- **BF16/FP16 separation**: Split weights into sign, exponent, and mantissa components, compress each separately. Exponents tend to cluster, mantissas have different entropy patterns.
+- **Per-dtype block selection**: Use different codec parameters for BF16 blocks vs FP32 blocks vs INT8 blocks.
+- **Tensor-specific dictionaries**: Build zstd dictionaries from tensors of the same shape and dtype across the model.
 
 ### Block-Level Loading
 

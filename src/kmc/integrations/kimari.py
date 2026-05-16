@@ -3,10 +3,10 @@
 This module provides a clean adapter layer that maps Kimari CLI commands
 to the underlying KMC operations:
 
-    kimari compress       -> kmc pack
+    kimari compress       -> kmc pack [--tensor-aware]
     kimari decompress     -> kmc unpack
     kimari verify-compress -> kmc verify
-    kimari bench-compress -> kmc bench
+    kimari bench-compress -> kmc bench [--compare-zipnn]
 
 Usage from Kimari CLI:
 
@@ -34,6 +34,7 @@ def kimari_compress(
     output: str | Path,
     block_size: int = DEFAULT_BLOCK_SIZE,
     level: int = 3,
+    tensor_aware: bool = True,
 ) -> dict:
     """Compress a model using KMC (kimari compress).
 
@@ -42,6 +43,7 @@ def kimari_compress(
         output: Output .kmc archive path.
         block_size: Block size in bytes.
         level: Compression level.
+        tensor_aware: Use tensor-aware mode (default True for Kimari).
 
     Returns:
         Dict with status, original and compressed sizes, and ratio.
@@ -49,7 +51,7 @@ def kimari_compress(
     source = Path(source)
     output = Path(output)
 
-    pack(source, output, block_size=block_size, level=level)
+    pack(source, output, block_size=block_size, level=level, tensor_aware=tensor_aware)
 
     if source.is_file():
         orig_size = source.stat().st_size
@@ -66,6 +68,7 @@ def kimari_compress(
         "original_size": orig_size,
         "compressed_size": comp_size,
         "ratio": ratio,
+        "tensor_aware": tensor_aware,
     }
 
 
@@ -123,6 +126,8 @@ def kimari_bench_compress(
     block_size: int = DEFAULT_BLOCK_SIZE,
     level: int = 3,
     synthetic: bool = False,
+    tensor_aware: bool = True,
+    compare_zipnn: bool = False,
 ) -> BenchmarkResult:
     """Benchmark compression (kimari bench-compress).
 
@@ -132,6 +137,8 @@ def kimari_bench_compress(
         block_size: Block size in bytes.
         level: Compression level.
         synthetic: Whether the data is synthetic.
+        tensor_aware: Use tensor-aware mode (default True for Kimari).
+        compare_zipnn: Compare with ZipNN if available.
 
     Returns:
         BenchmarkResult with all measurements.
@@ -142,13 +149,15 @@ def kimari_bench_compress(
         block_size=block_size,
         level=level,
         synthetic=synthetic,
+        tensor_aware=tensor_aware,
+        compare_zipnn=compare_zipnn,
     )
 
 
 # Command mapping for documentation
 KIMARI_COMMAND_MAP = {
-    "kimari compress": "kmc pack",
+    "kimari compress": "kmc pack [--tensor-aware]",
     "kimari decompress": "kmc unpack",
     "kimari verify-compress": "kmc verify",
-    "kimari bench-compress": "kmc bench",
+    "kimari bench-compress": "kmc bench [--compare-zipnn]",
 }
