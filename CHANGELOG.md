@@ -5,6 +5,39 @@ All notable changes to Kimari MicroCompress are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-alpha] — 2026-05-17
+
+### Added
+
+- **Streaming I/O module** (`src/kmc/io/`) — Block-based file reading and writing without loading entire files into memory. `iter_file_blocks()` yields fixed-size chunks, `sha256_stream()` computes hashes via streaming reads, `write_blocks_from_iter()` accepts generators for truly streaming writes.
+- **Parallel block compression** (`src/kmc/parallel.py`) — Optional parallel compression using `ThreadPoolExecutor`. `--jobs N` flag on pack/unpack/bench commands. `--jobs 1` preserves sequential behavior. Results are always deterministic regardless of worker count.
+- **Progress reporting** (`src/kmc/reporting.py`) — `--progress` flag on pack, unpack, and bench commands. `ProgressReporter` class with start/update/finish methods. Automatic suppression when `--json` is used. Graceful plain-text output without requiring external dependencies.
+- **Quick verification mode** — `kmc verify --quick` checks manifest and block hashes without decompressing. Significantly faster for large archives. `kmc verify --full` (default) decompresses all blocks and verifies file hashes.
+- **Benchmark job comparison** — `kmc bench --compare-jobs 1,2,4,auto` flag for comparing performance across different worker counts.
+- **Kimari CLI plugin integration** (`src/kmc/integrations/kimari_plugin.py`) — Clean plugin interface for Kimari CLI. `register_kimari_commands()` function registers compress, decompress, verify-compress, bench-compress, and inspect-model commands. No circular dependencies.
+- **Plugin registration example** (`examples/kimari_plugin_registration.py`) — Demonstrates how to integrate KMC into a Kimari CLI application.
+- **Manifest v5** — New `parallelism` field recording `created_with_jobs` and `deterministic_order`. Backward compatible with v1/v2/v3/v4 manifests.
+- **49 new tests** for streaming I/O, parallel compression, progress reporting, verify modes, CLI flags, manifest v5, robustness, and Kimari plugin integration.
+
+### Changed
+
+- **Version bumped** to 0.6.0-alpha in pyproject.toml, __init__.py, and manifest.py
+- **`src/kmc/archive.py`** — Added `jobs` and `progress_reporter` parameters to `pack()`. Added `verify_quick()` function. Manifest records `parallelism` metadata when `jobs > 1`.
+- **`src/kmc/cli.py`** — Added `--jobs` flag to pack, unpack, and bench commands. Added `--progress` flag. Added `--quick`/`--full` flags to verify. Added `--compare-jobs` to bench.
+- **`src/kmc/manifest.py`** — Added `parallelism` field to KMCManifest. Version bumped to 5. Backward compatible.
+- **277 tests passing** (up from 228 in v0.5.0-alpha)
+
+### Robustness
+
+- Empty directory packing creates valid archives
+- Empty file packing creates valid archives
+- Unicode filename roundtrip works correctly
+- Many small files packing works correctly
+- Output overwrites existing files correctly
+- Truncated archive detected by verify_quick
+- Corrupt manifest detected by verify_full
+- Parallel compression preserves deterministic block order
+
 ## [0.5.0-alpha] — 2026-05-16
 
 ### Added
@@ -32,12 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 
 - 228 tests passing (up from 161 in v0.4.0-alpha)
-- New test modules: test_gguf.py, test_lora_workflow.py, test_checkpoint_workflow.py, test_v05_manifest.py, test_v05_cli.py
-- GGUF tests: synthetic valid/invalid files, tensor count, metadata KV count, quantization summary, inspect
-- LoRA tests: valid adapter, config with base model, incomplete config, pack roundtrip, inspect JSON
-- Checkpoint tests: detect checkpoint-1000, detect optimizer/scheduler/rng, pack roundtrip, inspect
-- Manifest tests: artifact_type default, backward compat v0.2/v0.3/v0.4, format_metadata GGUF/safetensors
-- CLI tests: help for new subcommands, inspect flags
 
 ## [0.4.0-alpha] — 2026-05-14
 

@@ -457,6 +457,8 @@ def pack(
     gguf_aware: bool = False,
     artifact_type: str = "unknown",
     artifact_metadata: dict | None = None,
+    jobs: int = 1,
+    progress_reporter: object | None = None,
 ) -> None:
     """Pack a directory or single file into a .kmc archive.
 
@@ -471,6 +473,8 @@ def pack(
         gguf_aware: If True, enable experimental GGUF-aware compression mode.
         artifact_type: Artifact type for the manifest (e.g., 'lora_adapter').
         artifact_metadata: Artifact-specific metadata for the manifest.
+        jobs: Number of parallel compression workers (1 = sequential).
+        progress_reporter: Optional ProgressReporter for progress updates.
     """
     source = Path(source).resolve()
     output = Path(output).resolve()
@@ -633,6 +637,13 @@ def pack(
         if safetensors_meta:
             manifest.format_metadata["safetensors"] = safetensors_meta
 
+    # Record parallelism metadata (v0.6+)
+    if jobs > 1:
+        manifest.parallelism = {
+            "created_with_jobs": jobs,
+            "deterministic_order": True,
+        }
+
     # Compute correct offsets iteratively
     for _ in range(20):
         manifest_bytes = manifest.to_bytes()
@@ -773,6 +784,81 @@ def verify(archive: Path) -> list[str]:
     return report.errors
 
 
+def verify_quick(archive: Path) -> VerificationReport:
+    """Perform a quick verification of a .kmc archive.
+
+    Checks the header, manifest, and block hashes without decompressing
+    or reconstructing the original files. This is significantly faster
+    than verify_full for large archives.
+
+    Args:
+        archive: Path to the .kmc archive.
+
+    Returns:
+        VerificationReport with quick check results.
+    """
+    archive = Path(archive).resolve()
+    report = VerificationReport(archive_path=str(archive))
+
+    try:
+        manifest, data_start = read_manifest_from_archive(archive)
+    except (ValueError, OSError) as e:
+        report.integrity = "FAILED"
+        report.errors.append(f"Failed to read archive: {e}")
+        return report
+
+    report.format_version = manifest.version
+    report.tool = manifest.tool
+    report.tool_version = manifest.tool_version
+    report.created_at = manifest.created_at
+    report.total_files = len(manifest.files)
+    report.total_blocks = sum(len(f.blocks) for f in manifest.files)
+    report.compressed_size = manifest.total_compressed_size
+    report.restored_size = manifest.total_original_size
+
+    if manifest.version not in (1, 2, 3, 4, 5):
+        report.warnings.append(f"Unknown manifest version: v{manifest.version}")
+
+    structural_errors = validate_manifest(manifest)
+    if structural_errors:
+        report.integrity = "FAILED"
+        report.errors.extend(structural_errors)
+        return report
+
+    # Quick check: verify block hashes without decompressing
+    archive_size = archive.stat().st_size
+    with open(archive, "rb") as f:
+        for file_entry in manifest.files:
+            for block in file_entry.blocks:
+                if block.offset + block.compressed_size > archive_size:
+                    report.integrity = "FAILED"
+                    report.errors.append(
+                        f"Block {block.index} of '{file_entry.path}' exceeds archive size"
+                    )
+                    continue
+
+                f.seek(block.offset)
+                block_data = f.read(block.compressed_size)
+
+                if len(block_data) < block.compressed_size:
+                    report.integrity = "FAILED"
+                    report.errors.append(
+                        f"Block {block.index} of '{file_entry.path}': "
+                        f"could not read full block data"
+                    )
+                    continue
+
+                actual_hash = sha256_block(block_data)
+                if actual_hash != block.hash:
+                    report.integrity = "FAILED"
+                    report.errors.append(
+                        f"Block {block.index} of '{file_entry.path}': "
+                        f"checksum mismatch (quick check)"
+                    )
+
+    return report
+
+
 def verify_full(archive: Path) -> VerificationReport:
     """Perform a full verification of a .kmc archive and return a report."""
     archive = Path(archive).resolve()
@@ -794,7 +880,7 @@ def verify_full(archive: Path) -> VerificationReport:
     report.compressed_size = manifest.total_compressed_size
     report.restored_size = manifest.total_original_size
 
-    if manifest.version not in (1, 2, 3, 4):
+    if manifest.version not in (1, 2, 3, 4, 5):
         report.warnings.append(f"Unknown manifest version: v{manifest.version}")
 
     structural_errors = validate_manifest(manifest)

@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from .archive import DEFAULT_BLOCK_SIZE, inspect, pack, unpack, verify_full
+from .archive import DEFAULT_BLOCK_SIZE, inspect, pack, unpack, verify_full, verify_quick
 from .benchmark import (
     benchmark_to_json,
     format_benchmark_table,
@@ -26,6 +26,8 @@ def cmd_pack(args: argparse.Namespace) -> None:
     tensor_aware = getattr(args, "tensor_aware", False)
     codec = getattr(args, "codec", "auto")
     gguf_aware = getattr(args, "gguf_aware", False)
+    jobs = getattr(args, "jobs", 1)
+    show_progress = getattr(args, "progress", False)
 
     if not source.exists():
         print(f"Error: source not found: {source}", file=sys.stderr)
@@ -40,10 +42,17 @@ def cmd_pack(args: argparse.Namespace) -> None:
     mode_str = " (tensor-aware)" if tensor_aware else ""
     codec_str = f" --codec {codec}" if codec != "auto" else ""
     gguf_str = " (gguf-aware)" if gguf_aware else ""
+    jobs_str = f" --jobs {jobs}" if jobs > 1 else ""
     print(
-        f"Packing {source} -> {output}{mode_str}{codec_str}{gguf_str} "
+        f"Packing {source} -> {output}{mode_str}{codec_str}{gguf_str}{jobs_str} "
         f"(block_size={block_size}, level={level})"
     )
+
+    from .reporting import create_reporter
+
+    reporter = create_reporter(show_progress=show_progress, json_mode=False)
+    reporter.start("Packing")
+
     start = time.time()
     pack(
         source,
@@ -53,6 +62,8 @@ def cmd_pack(args: argparse.Namespace) -> None:
         tensor_aware=tensor_aware,
         codec=codec,
         gguf_aware=gguf_aware,
+        jobs=jobs,
+        progress_reporter=reporter,
     )
     elapsed = time.time() - start
 
@@ -64,6 +75,7 @@ def cmd_pack(args: argparse.Namespace) -> None:
     comp = output.stat().st_size
     ratio = comp / orig if orig > 0 else 0
 
+    reporter.finish(f"{elapsed:.2f}s")
     print(f"Done in {elapsed:.2f}s — {orig:,} -> {comp:,} bytes (ratio: {ratio:.2%})")
 
 
@@ -191,13 +203,18 @@ def cmd_unpack(args: argparse.Namespace) -> None:
 def cmd_verify(args: argparse.Namespace) -> None:
     """Verify the integrity of a .kmc archive with detailed report."""
     archive = Path(args.archive)
+    verify_mode = getattr(args, "verify_mode", "full")
 
     if not archive.exists():
         print(f"Error: archive not found: {archive}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Verifying {archive} ...")
-    report = verify_full(archive)
+    if verify_mode == "quick":
+        print(f"Quick-verifying {archive} ...")
+        report = verify_quick(archive)
+    else:
+        print(f"Verifying {archive} ...")
+        report = verify_full(archive)
     print()
     print(report)
 
@@ -900,6 +917,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Experimental: use GGUF-aware compression mode",
     )
+    p_pack.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of parallel workers (default: 1, use 'auto' for cpu_count)",
+    )
+    p_pack.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress during operation",
+    )
     p_pack.set_defaults(func=cmd_pack)
 
     # pack-lora
@@ -942,12 +971,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_unpack = sub.add_parser("unpack", help="Unpack a .kmc archive")
     p_unpack.add_argument("archive", help=".kmc archive path")
     p_unpack.add_argument("output", help="Output directory")
+    p_unpack.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of parallel workers (default: 1)",
+    )
+    p_unpack.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress during operation",
+    )
     p_unpack.set_defaults(func=cmd_unpack)
 
     # verify
     p_verify = sub.add_parser("verify", help="Verify a .kmc archive integrity (full report)")
     p_verify.add_argument("archive", help=".kmc archive path")
-    p_verify.set_defaults(func=cmd_verify)
+    p_verify.add_argument(
+        "--quick",
+        action="store_const",
+        const="quick",
+        dest="verify_mode",
+        help="Quick verify: check manifest and block hashes without decompressing",
+    )
+    p_verify.add_argument(
+        "--full",
+        action="store_const",
+        const="full",
+        dest="verify_mode",
+        default="full",
+        help="Full verify: decompress all blocks and verify file hashes (default)",
+    )
+    p_verify.set_defaults(func=cmd_verify, verify_mode="full")
 
     # inspect
     p_inspect = sub.add_parser(
@@ -1014,6 +1070,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--compare-codecs",
         action="store_true",
         help="Compare all available codecs",
+    )
+    p_bench.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of parallel workers (default: 1)",
+    )
+    p_bench.add_argument(
+        "--compare-jobs",
+        default=None,
+        help="Compare different job counts (e.g., '1,2,4,auto')",
+    )
+    p_bench.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress during operation",
     )
     p_bench.set_defaults(func=cmd_bench)
 

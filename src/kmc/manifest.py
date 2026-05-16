@@ -21,6 +21,10 @@ Format version history:
         - artifact_metadata: Dict with artifact-specific metadata (e.g., LoRA rank).
         - format_metadata: Dict with format-specific metadata (e.g., GGUF info).
         - Backward-compatible: v1/v2/v3 manifests read without errors in v4 readers.
+    - v5 (KMC v0.6): Adds parallelism and streaming metadata.
+        - KMCManifest gains parallelism field recording worker count and deterministic
+          order guarantee.
+        - Backward-compatible: v1/v2/v3/v4 manifests read without errors in v5 readers.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-KMC_MANIFEST_VERSION = 4  # v0.5-alpha with artifact_type and format_metadata
+KMC_MANIFEST_VERSION = 5  # v0.6-alpha with parallelism and streaming metadata
 
 
 @dataclass
@@ -106,7 +110,7 @@ class KMCManifest:
 
     version: int = KMC_MANIFEST_VERSION
     tool: str = "kimari-microcompress"
-    tool_version: str = "0.5.0-alpha"
+    tool_version: str = "0.6.0-alpha"
     created_at: str = ""
     total_original_size: int = 0
     total_compressed_size: int = 0
@@ -115,6 +119,8 @@ class KMCManifest:
     artifact_type: str = "unknown"  # huggingface_model|gguf_model|lora_adapter|...
     artifact_metadata: dict = field(default_factory=dict)
     format_metadata: dict = field(default_factory=dict)
+    # v0.6 fields (optional, for parallelism tracking)
+    parallelism: dict = field(default_factory=dict)  # v0.6: parallelism metadata
 
     def to_json(self) -> str:
         """Serialize manifest to JSON string."""
@@ -170,6 +176,7 @@ class KMCManifest:
             artifact_type=data.get("artifact_type", "unknown"),
             artifact_metadata=data.get("artifact_metadata", {}),
             format_metadata=data.get("format_metadata", {}),
+            parallelism=data.get("parallelism", {}),
         )
 
     def to_bytes(self) -> bytes:

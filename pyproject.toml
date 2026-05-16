@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kimari-microcompress"
-version = "0.5.0-alpha"
-description = "Reversible lossless compression for AI models: safetensors, GGUF, checkpoints, LoRA/QLoRA, GGUF-aware mode and artifact workflows."
+version = "0.6.0-alpha"
+description = "Reversible lossless compression for AI models: streaming I/O, parallel compression, safetensors, GGUF, LoRA, checkpoints, tensor-aware codecs."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
