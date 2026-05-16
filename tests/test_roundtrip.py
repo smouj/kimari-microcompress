@@ -43,14 +43,12 @@ def test_roundtrip_directory():
         source_dir = tmpdir / "source"
         source_dir.mkdir()
 
-        (source_dir / "model.safetensors").write_bytes(
-            b"\x00\x01\x02\x03" * 5000
-        )
+        (source_dir / "model.safetensors").write_bytes(b"\x00\x01\x02\x03" * 5000)
         (source_dir / "config.json").write_bytes(b'{"model_type": "test"}')
 
         subdir = source_dir / "layers"
         subdir.mkdir()
-        (subdir / "layer0.bin").write_bytes(b"\xFF" * 10000)
+        (subdir / "layer0.bin").write_bytes(b"\xff" * 10000)
 
         # Pack
         archive = tmpdir / "test.kmc"

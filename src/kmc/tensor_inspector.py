@@ -85,13 +85,15 @@ def parse_safetensors_header(path: Path) -> SafetensorsMeta:
         total_params += param_count
         total_bytes += byte_size
 
-        tensors.append(TensorInfo(
-            name=name,
-            dtype=dtype,
-            shape=shape,
-            byte_offset=byte_offset,
-            byte_size=byte_size,
-        ))
+        tensors.append(
+            TensorInfo(
+                name=name,
+                dtype=dtype,
+                shape=shape,
+                byte_offset=byte_offset,
+                byte_size=byte_size,
+            )
+        )
 
     return SafetensorsMeta(
         header_size=8 + header_len,

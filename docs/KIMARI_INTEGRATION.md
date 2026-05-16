@@ -2,105 +2,132 @@
 
 ## Overview
 
-Kimari MicroCompress is designed as a foundational component of the Kimari ecosystem. This document outlines the planned integration path between KMC and the broader Kimari platform.
+Kimari MicroCompress is designed as a foundational component of the Kimari ecosystem. This document describes the integration path between KMC and the Kimari CLI, including the adapter layer already implemented.
+
+## Command Mapping
+
+The integration maps Kimari CLI commands to KMC operations:
+
+| Kimari Command | KMC Equivalent | Description |
+|----------------|---------------|-------------|
+| `kimari compress` | `kmc pack` | Compress a model into a .kmc archive |
+| `kimari decompress` | `kmc unpack` | Decompress a .kmc archive |
+| `kimari verify-compress` | `kmc verify` | Verify archive integrity |
+| `kimari bench-compress` | `kmc bench` | Benchmark compression performance |
+
+## Integration Layer
+
+The adapter module is implemented at `src/kmc/integrations/kimari.py` and provides:
+
+```python
+from kmc.integrations.kimari import (
+    kimari_compress,        # -> kmc pack
+    kimari_decompress,      # -> kmc unpack
+    kimari_verify_compress, # -> kmc verify
+    kimari_bench_compress,  # -> kmc bench
+    KIMARI_COMMAND_MAP,     # Command mapping dict
+)
+```
+
+### Usage Example
+
+```python
+from kmc.integrations.kimari import kimari_compress, kimari_verify_compress
+
+# Compress
+result = kimari_compress("./my-model", "./my-model.kmc", level=3)
+# result = {"status": "ok", "original_size": 1000000, "compressed_size": 600000, "ratio": 0.6}
+
+# Verify
+verify_result = kimari_verify_compress("./my-model.kmc")
+# verify_result = {"status": "ok", "integrity": "OK", "errors": [], "total_files": 5}
+```
 
 ## Integration Architecture
 
 ```
-┌─────────────────────┐
-│  Kimari Platform     │
-│                      │
-│  ┌────────────────┐  │
-│  │ kimari compress│◄─┼── KMC CLI / Python API
-│  └────────────────┘  │
-│  ┌────────────────┐  │
-│  │ kimari store   │◄─┼── .kmc archive storage
-│  └────────────────┘  │
-│  ┌────────────────┐  │
-│  │ kimari verify  │◄─┼── SHA-256 integrity checks
-│  └────────────────┘  │
-│  ┌────────────────┐  │
-│  │ kimari serve   │◄─┼── Block-level serving (future)
-│  └────────────────┘  │
-└─────────────────────┘
+┌─────────────────────────────────┐
+│  Kimari CLI                      │
+│                                  │
+│  kimari compress ./model         │
+│       ↓                          │
+│  ┌─────────────────────────────┐ │
+│  │ kmc.integrations.kimari    │ │  Adapter layer
+│  │   kimari_compress()        │ │
+│  └─────────────────────────────┘ │
+│       ↓                          │
+│  ┌─────────────────────────────┐ │
+│  │ kmc.archive                │ │  Core KMC
+│  │   pack()                   │ │
+│  └─────────────────────────────┘ │
+└─────────────────────────────────┘
 ```
 
-## Phase 1: `kimari compress` Command
+## Design Principles
 
-The first integration point is a `kimari compress` command that wraps KMC's functionality:
+1. **KMC is independent**: The `kmc` CLI operates standalone. Kimari integration is optional.
+2. **Adapter pattern**: The integration layer translates Kimari conventions to KMC calls without modifying KMC internals.
+3. **Return values**: Integration functions return structured dicts or dataclasses, not CLI output.
+4. **No circular dependencies**: KMC does not depend on Kimari. Kimari depends on KMC.
 
-```bash
-kimari compress ./my-model --output ./my-model.kmc
-kimari decompress ./my-model.kmc --output ./restored/
-kimari verify ./my-model.kmc
-```
+## Phase 1: Adapter Layer (Current)
 
-This provides a Kimari-branded interface while delegating to KMC's core implementation.
+- [x] `kimari_compress()` adapter function
+- [x] `kimari_decompress()` adapter function
+- [x] `kimari_verify_compress()` adapter function
+- [x] `kimari_bench_compress()` adapter function
+- [x] Command mapping documentation
 
-### Implementation
+## Phase 2: Kimari CLI Integration (Next)
 
-```python
-# kimari/compress.py (conceptual)
-from kmc.archive import pack, unpack, verify as kmc_verify
+- [ ] Add `kimari compress` subcommand to Kimari CLI
+- [ ] Add `kimari decompress` subcommand
+- [ ] Add `kimari verify-compress` subcommand
+- [ ] Add `kimari bench-compress` subcommand
+- [ ] Shared configuration (block size, compression level)
+- [ ] Progress reporting integration
 
-def compress(source, output, **kwargs):
-    """Compress a model using KMC."""
-    pack(source, output, **kwargs)
-
-def decompress(archive, output, **kwargs):
-    """Decompress a KMC archive."""
-    unpack(archive, output, **kwargs)
-
-def verify(archive, **kwargs):
-    """Verify a KMC archive's integrity."""
-    return kmc_verify(archive)
-```
-
-## Phase 2: KimariDB Storage Backend
+## Phase 3: KimariDB Storage Backend
 
 KMC archives can be stored in KimariDB with metadata indexing:
 
-- Archive hash (SHA-256 of the .kmc file).
-- Source model identifier (Hugging Face model ID, custom ID).
-- Compression ratio and codec information.
-- Creation timestamp and tool version.
+- Archive hash (SHA-256 of the .kmc file)
+- Source model identifier (Hugging Face model ID, custom ID)
+- Compression ratio and codec information
+- Creation timestamp and tool version
 
 This enables:
-- Content-addressed storage (deduplication of identical archives).
-- Fast lookup of compressed versions of known models.
-- Verification that stored archives haven't been tampered with.
+- Content-addressed storage (deduplication of identical archives)
+- Fast lookup of compressed versions of known models
+- Verification that stored archives haven't been tampered with
 
-## Phase 3: Download-Cache-Verify Workflow
+## Phase 4: Download-Cache-Verify Workflow
 
-Integrate with Hugging Face Hub for a seamless download-compress-verify workflow:
+Integrate with Hugging Face Hub for a seamless workflow:
 
 ```bash
 kimari download huggingface/gpt2 --compress --verify
 ```
 
 This would:
-1. Download model files from Hugging Face.
-2. Compress them into a .kmc archive.
-3. Verify the archive integrity.
-4. Store the archive in the local KimariDB cache.
-5. Register the archive metadata for future lookups.
+1. Download model files from Hugging Face
+2. Compress them into a .kmc archive
+3. Verify the archive integrity
+4. Store the archive in the local KimariDB cache
+5. Register the archive metadata for future lookups
 
-## Phase 4: Block-Level Serving
+## Phase 5: Block-Level Serving
 
-The most ambitious integration is block-level serving of model data:
+The most ambitious integration is block-level serving:
 
-1. KMC archives are stored in KimariDB with full block metadata.
-2. When a model is loaded for inference, only the required blocks are fetched and decompressed.
-3. This enables:
-   - Loading specific layers on demand.
-   - Streaming model loading for large models.
-   - Memory-efficient inference on resource-constrained devices.
+1. KMC archives are stored in KimariDB with full block metadata
+2. When a model is loaded for inference, only the required blocks are fetched and decompressed
+3. This enables loading specific layers on demand, streaming model loading, and memory-efficient inference
 
 ### API Concept
 
 ```python
-# Block-level loading (conceptual)
-from kimari.serve import BlockServer
+from kmc.integrations.kimari import BlockServer
 
 server = BlockServer("huggingface/llama-7b.kmc")
 
@@ -109,17 +136,11 @@ embedding = server.load_tensor("model.embed_tokens.weight")
 layers_0_3 = server.load_range(start=0, count=4)
 ```
 
-## Compatibility Notes
-
-- KMC archives are self-contained and don't require the Kimari platform to use.
-- The `kmc` CLI operates independently of any Kimari services.
-- Kimari integration adds value on top of KMC's core functionality.
-- Archives created with `kmc pack` can be used with future `kimari compress` features.
-
 ## Testing Integration
 
 Integration tests should cover:
-- Roundtrip via `kimari compress` → `kimari decompress`.
-- Verification via `kimari verify` matches `kmc verify`.
-- Metadata consistency between KMC and KimariDB.
-- Backward compatibility of .kmc archives across KMC versions.
+- Roundtrip via `kimari_compress()` -> `kimari_decompress()`
+- Verification via `kimari_verify_compress()` matches `kmc verify`
+- Metadata consistency between KMC and KimariDB
+- Backward compatibility of .kmc archives across KMC versions
+- Error propagation from KMC to Kimari CLI

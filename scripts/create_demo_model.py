@@ -91,7 +91,7 @@ def create_demo_model(output_dir: str = "demo-model") -> None:
         json.dump(tokenizer, f, indent=2)
 
     # 4. Binary data (simulating model weights with repetitive patterns)
-    weight_data = b"\xAB\xCD" * 50000  # 100 KB
+    weight_data = b"\xab\xcd" * 50000  # 100 KB
     with open(base / "pytorch_model-00001-of-00001.bin", "wb") as f:
         f.write(weight_data)
 

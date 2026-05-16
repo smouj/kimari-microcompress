@@ -55,9 +55,7 @@ class KMCManifest:
         files = []
         for f in data.get("files", []):
             blocks = [BlockEntry(**b) for b in f.get("blocks", [])]
-            files.append(
-                FileEntry(**{k: v for k, v in f.items() if k != "blocks"}, blocks=blocks)
-            )
+            files.append(FileEntry(**{k: v for k, v in f.items() if k != "blocks"}, blocks=blocks))
         return cls(
             version=data.get("version", KMC_MANIFEST_VERSION),
             tool=data.get("tool", "kimari-microcompress"),
