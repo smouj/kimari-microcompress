@@ -1,4 +1,6 @@
 <div align="center">
+    
+<img width="1250" height="625" alt="socialbanner-kimari-mc" src="https://github.com/user-attachments/assets/b1d35be3-d94d-4d21-a18b-b8fb6aa2c872" />
 
 # Kimari MicroCompress
 
