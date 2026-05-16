@@ -9,7 +9,7 @@
 5. Never invent or fabricate benchmark results.
 6. Clearly distinguish between synthetic and real data benchmarks.
 
-## KMC v0.3.0-alpha Benchmark Capabilities
+## KMC v0.4.0-alpha Benchmark Capabilities
 
 ### Core Benchmarking
 
@@ -27,9 +27,47 @@ kmc bench ./model ./model-bench.kmc --tensor-aware
 
 # Mark data as synthetic
 kmc bench ./model ./model-bench.kmc --synthetic
+
+# With a specific codec
+kmc bench ./model ./model-bench.kmc --codec byteplane
+kmc bench ./model ./model-bench.kmc --codec floatplane
 ```
 
-### ZipNN Comparison
+### Codec Comparison Benchmarks (v0.4+)
+
+The `--compare-codecs` flag runs the benchmark with all available codecs and produces a side-by-side comparison:
+
+```bash
+# Compare all codecs on the same data
+kmc bench ./model ./model-bench.kmc --compare-codecs
+
+# Compare codecs with JSON output
+kmc bench ./model ./model-bench.kmc --compare-codecs --json --output codec-comparison.json
+```
+
+When `--compare-codecs` is used, the benchmark tests each available codec (`auto`, `byteplane`, `floatplane`, `zstd`, `zlib`, `raw`) on the same input and reports compressed size, ratio, and timing for each.
+
+**No claims of superiority are made.** The results are measurements, not marketing. Different models and dtypes may favor different codecs.
+
+### Synthetic Tensor Fixtures (v0.4+)
+
+For reproducible codec comparison benchmarks, KMC uses synthetic tensor fixtures with known properties:
+
+| Fixture | Dtype | Shape | Size | Description |
+|---------|-------|-------|------|-------------|
+| BF16 weights | BF16 | [256, 256] | 128 KB | Simulated weight matrix |
+| FP16 weights | FP16 | [256, 256] | 128 KB | Simulated weight matrix |
+| FP32 weights | FP32 | [256, 256] | 256 KB | Simulated weight matrix |
+| Mixed BF16 model | BF16 | Various | ~1 MB | Multiple tensors with different shapes |
+| Random bytes | N/A | N/A | 256 KB | Incompressible baseline |
+
+These fixtures are generated programmatically and marked with `synthetic: true` in JSON output. They are useful for validating codec behavior but **do not represent real-world compression ratios**.
+
+### Real Model Benchmark Script
+
+The `scripts/bench_small_hf_model.py` script provides a more realistic benchmark using actual HuggingFace models. See [REAL_MODEL_BENCHMARK.md](REAL_MODEL_BENCHMARK.md) for details.
+
+## ZipNN Comparison
 
 ```bash
 # Compare with ZipNN (if installed)
@@ -56,7 +94,7 @@ All benchmark results include environment information for reproducibility:
     "os_version": "6.1.0",
     "cpu": "AMD Ryzen 9 7950X",
     "ram_gb": 64.0,
-    "kmc_version": "0.3.0-alpha",
+    "kmc_version": "0.4.0-alpha",
     "zipnn_version": "0.3.0",
     "zstd_available": true
   }
@@ -126,6 +164,11 @@ Download the model files using Hugging Face `from_pretrained` or direct download
 kmc pack ./model ./model.kmc -l 3
 kmc pack ./model ./model.kmc -l 3 --tensor-aware
 kmc pack ./model ./model-l9.kmc -l 9
+
+# Pack with tensor-aware codecs
+kmc pack ./model ./model.kmc --codec auto --tensor-aware
+kmc pack ./model ./model-bp.kmc --codec byteplane --tensor-aware
+kmc pack ./model ./model-fp.kmc --codec floatplane --tensor-aware
 ```
 
 ### 3. Pack with Baseline Tools
@@ -143,7 +186,17 @@ pip install zipnn
 kmc bench ./model ./model-bench.kmc --compare-zipnn --json --output bench-results.json
 ```
 
-### 5. Verify and Unpack
+### 5. Multi-Codec Comparison (v0.4+)
+
+```bash
+# Compare all available codecs
+kmc bench ./model ./model-bench.kmc --compare-codecs --json --output codec-comparison.json
+
+# Or use the real model benchmark script
+python scripts/bench_small_hf_model.py ./model
+```
+
+### 6. Verify and Unpack
 
 ```bash
 kmc verify ./model.kmc
@@ -151,9 +204,9 @@ kmc unpack ./model.kmc ./restored/
 diff -r ./model ./restored/
 ```
 
-### 6. Record Results
+### 7. Record Results
 
-For each combination of model, tool, and compression level, record:
+For each combination of model, tool, codec, and compression level, record:
 - Original size
 - Compressed size
 - Compression ratio
@@ -163,7 +216,7 @@ For each combination of model, tool, and compression level, record:
 - Peak memory usage
 - Environment metadata
 
-### 7. Compare
+### 8. Compare
 
 Generate comparison tables and charts showing KMC vs. baselines vs. ZipNN.
 
@@ -171,8 +224,8 @@ Generate comparison tables and charts showing KMC vs. baselines vs. ZipNN.
 
 Based on ZipNN's published results and the nature of AI model weights:
 
-- **safetensors**: Expected 30-50% compression ratio, similar to ZipNN. The uniform float32/float16 data may benefit from zstd's dictionary mode across blocks.
-- **GGUF (quantized)**: Expected 5-15% compression, since quantized data is already compact. Some metadata and vocabulary sections may compress well.
+- **safetensors**: Expected 30-50% compression ratio, similar to ZipNN. The uniform float32/float16 data may benefit from zstd's dictionary mode across blocks. BytePlane and FloatPlane codecs may improve on this for FP16/BF16 tensors.
+- **GGUF (quantized)**: Expected 5-15% compression, since quantized data is already compact. Some metadata and vocabulary sections may compress well. Tensor-aware codecs are not expected to help here.
 - **LoRA adapters**: Expected 40-60% compression, as low-rank matrices have significant structure.
 - **PyTorch .bin**: Expected 30-50%, similar to safetensors, but with additional pickle overhead that may not compress as well.
 
@@ -206,3 +259,26 @@ When comparing with ZipNN:
 ### Synthetic Data Warning
 
 Synthetic data benchmarks (using random or repetitive test data) produce results that are not representative of real-world compression. All synthetic benchmarks are clearly marked with `synthetic: true` in JSON output.
+
+### VRAM Disclaimer
+
+KMC benchmarks measure **storage compression ratio**, not inference VRAM reduction. A smaller .kmc archive does not mean the model uses less VRAM during inference. The model must be fully decompressed before loading, and occupies the same VRAM regardless of how it was stored.
+
+## Codec Comparison Methodology (v0.4+)
+
+When comparing codecs (via `--compare-codecs` or `bench_small_hf_model.py`), the following methodology applies:
+
+1. **Same input data**: All codecs compress the exact same source files.
+2. **Same block size**: All codecs use the same block size (default 256 KiB).
+3. **Roundtrip verified**: Each codec must pass roundtrip verification (decompress matches original) to be included in results.
+4. **Metrics reported**: Compressed size, compression ratio, pack time, throughput.
+5. **Actual codecs used**: For `auto` mode, the report shows which codec was actually selected for each block.
+6. **No invented numbers**: If a codec fails or is unavailable, it is marked as such — no placeholder numbers are used.
+7. **Environment metadata**: All results include Python version, OS, CPU, RAM, and dependency versions for reproducibility.
+
+### Interpreting Codec Comparison Results
+
+- **`auto` mode** may choose different codecs for different blocks. A model with mixed dtypes may use FloatPlane for FP16 blocks and zstd for INT8 blocks.
+- **`byteplane`** and **`floatplane`** apply a transformation before compression. For already-compressed or non-floating-point data, these may produce larger output than raw zstd.
+- **`raw`** is a passthrough that stores data uncompressed. It serves as a baseline.
+- Results are **specific to the model and hardware** and should not be generalized without additional testing.

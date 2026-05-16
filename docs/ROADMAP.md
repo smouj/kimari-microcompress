@@ -10,7 +10,7 @@ These are **real, documented limitations** of the current KMC implementation. Th
 4. **GGUF block-aware compression is future work.** GGUF files are detected and their headers are parsed, but format-specific compression strategies (e.g., skipping already-quantized blocks) are not yet implemented.
 5. **No fixed compression ratios.** Results depend heavily on model format, data type, and content. Synthetic benchmarks produce misleadingly high ratios and should not be used as references.
 6. **KMC is not quantization.** If you need smaller models for inference, use quantization (GGUF Q4_K, GPTQ, AWQ, etc.). KMC is complementary: it compresses files for storage and transfer.
-7. **Tensor-aware mode is structural, not algorithmic.** The `--tensor-aware` flag aligns block boundaries to tensor boundaries but does not yet implement tensor-specific codecs (e.g., sign/exponent/mantissa separation for BF16/FP16). That is planned for v0.4.
+7. **Tensor-aware codecs are now available (v0.4).** BytePlane and FloatPlane codecs exploit tensor structure. However, KMC still does not reduce inference VRAM.
 8. **GGUF tensor metadata is not yet parsed.** The GGUF parser reads the header (magic, version, tensor count, KV count) but does not parse individual tensor descriptors or metadata values. Full parsing is planned for v0.5.
 
 ## v0.1 — MVP Archive
@@ -74,31 +74,42 @@ Real safetensors support, ZipNN benchmark comparison, and minimal GGUF parser:
 - [x] Hugging Face workflow documentation
 - [x] Updated README, ROADMAP, ARCHITECTURE, BENCHMARK_PLAN
 
-## v0.4 — Tensor-Aware Block Codec Experiments
+## v0.4 — Tensor-Aware Block Codecs (Completed)
 
 Real tensor-specific compression algorithms:
 
-- [ ] BF16/FP16 sign/exponent/mantissa separation codec
-- [ ] Per-dtype compression strategies
-- [ ] Block-level codec selection based on tensor dtype
-- [ ] Benchmark tensor-aware codecs against generic compression
-- [ ] Tests with small real models (GPT-2, BERT-base)
-- [ ] Public reproducible comparison against ZipNN
+- [x] BF16/FP16/FP32 byte-plane separation codec (BytePlane)
+- [x] BF16/FP16/FP32 sign/exponent/mantissa separation codec (FloatPlane)
+- [x] Per-dtype compression strategies (dtype-based candidate chains)
+- [x] Block-level codec selection based on tensor dtype (automatic selector)
+- [x] Per-block codec metadata in manifest (v3 format)
+- [x] `--codec auto|byteplane|floatplane|zstd|zlib|raw` CLI flag
+- [x] `--compression` flag for `kmc inspect`
+- [x] `--compare-codecs` flag for `kmc bench`
+- [x] Benchmark tensor-aware codecs against generic compression
+- [x] `scripts/bench_small_hf_model.py` for real model benchmarks
+- [x] 161 tests passing, ruff clean
 
-## v0.5 — LoRA/Checkpoint Compression Workflows
+> **Note:** KMC v0.4 does NOT reduce inference VRAM. It compresses model storage and transfer artifacts. Runtime compressed loading remains future work.
 
-Specialized compression for adapters and training artifacts:
+## v0.5 — GGUF Metadata + LoRA Workflows + Real Benchmarks
 
+Parser GGUF tensor metadata, specialized compression for adapters, and reproducible benchmarks:
+
+- [ ] GGUF tensor metadata parsing (full tensor descriptors and KV values)
 - [ ] Delta compression for LoRA adapters relative to base models
 - [ ] Checkpoint/gradients compression
-- [ ] GGUF tensor metadata parsing
 - [ ] GGUF block-aware compression (skip already-quantized blocks)
 - [ ] Optimizer state compression for training checkpoints
 - [ ] Weight sharing detection across model files
+- [ ] Benchmark with real small models (GPT-2, BERT-base, DistilGPT-2)
+- [ ] Public reproducible comparison against ZipNN on real data
+- [ ] Kimari CLI integration (compress/decompress/verify-compress/bench-compress)
+- [ ] Partial loading research (block server prototype)
 
-## v0.6 — Kimari CLI Integration
+## v0.6 — Kimari CLI + Streaming + Parallel
 
-Full integration with the Kimari ecosystem:
+Full integration with the Kimari ecosystem and performance improvements:
 
 - [ ] `kimari compress` command in Kimari CLI
 - [ ] `kimari decompress` command
@@ -107,6 +118,8 @@ Full integration with the Kimari ecosystem:
 - [ ] Shared configuration (block size, compression level)
 - [ ] Progress reporting integration
 - [ ] KimariDB storage backend integration
+- [ ] Parallel block compression/decompression
+- [ ] Streaming pack/unpack for minimal memory footprint
 
 ## v0.7 — Experimental Loader/Runtime Work
 
@@ -115,9 +128,9 @@ Block-level loading and runtime integration:
 - [ ] Block-level loading (partial decompression on demand)
 - [ ] Block server for remote block fetching
 - [ ] Memory-mapped archive reading for large files
-- [ ] Streaming pack/unpack for minimal memory footprint
 - [ ] Python API for programmatic block access
 - [ ] Integration with model loading frameworks
+- [ ] Runtime compressed loading (research phase)
 
 ## Future Research Directions
 

@@ -3,10 +3,10 @@
 This module provides a clean adapter layer that maps Kimari CLI commands
 to the underlying KMC operations:
 
-    kimari compress       -> kmc pack [--tensor-aware]
+    kimari compress       -> kmc pack [--tensor-aware] [--codec]
     kimari decompress     -> kmc unpack
     kimari verify-compress -> kmc verify
-    kimari bench-compress -> kmc bench [--compare-zipnn]
+    kimari bench-compress -> kmc bench [--compare-zipnn] [--compare-codecs]
 
 Usage from Kimari CLI:
 
@@ -35,6 +35,7 @@ def kimari_compress(
     block_size: int = DEFAULT_BLOCK_SIZE,
     level: int = 3,
     tensor_aware: bool = True,
+    codec: str = "auto",
 ) -> dict:
     """Compress a model using KMC (kimari compress).
 
@@ -44,6 +45,8 @@ def kimari_compress(
         block_size: Block size in bytes.
         level: Compression level.
         tensor_aware: Use tensor-aware mode (default True for Kimari).
+        codec: Compression codec ('auto', 'byteplane', 'floatplane',
+            'zstd', 'zlib', 'raw').
 
     Returns:
         Dict with status, original and compressed sizes, and ratio.
@@ -51,7 +54,14 @@ def kimari_compress(
     source = Path(source)
     output = Path(output)
 
-    pack(source, output, block_size=block_size, level=level, tensor_aware=tensor_aware)
+    pack(
+        source,
+        output,
+        block_size=block_size,
+        level=level,
+        tensor_aware=tensor_aware,
+        codec=codec,
+    )
 
     if source.is_file():
         orig_size = source.stat().st_size
@@ -69,6 +79,7 @@ def kimari_compress(
         "compressed_size": comp_size,
         "ratio": ratio,
         "tensor_aware": tensor_aware,
+        "codec": codec,
     }
 
 
@@ -128,6 +139,8 @@ def kimari_bench_compress(
     synthetic: bool = False,
     tensor_aware: bool = True,
     compare_zipnn: bool = False,
+    compare_codecs: bool = False,
+    codec: str = "auto",
 ) -> BenchmarkResult:
     """Benchmark compression (kimari bench-compress).
 
@@ -139,6 +152,8 @@ def kimari_bench_compress(
         synthetic: Whether the data is synthetic.
         tensor_aware: Use tensor-aware mode (default True for Kimari).
         compare_zipnn: Compare with ZipNN if available.
+        compare_codecs: Compare all available codecs.
+        codec: Compression codec for the main pipeline.
 
     Returns:
         BenchmarkResult with all measurements.
@@ -151,13 +166,17 @@ def kimari_bench_compress(
         synthetic=synthetic,
         tensor_aware=tensor_aware,
         compare_zipnn=compare_zipnn,
+        compare_codecs=compare_codecs,
+        codec=codec,
     )
 
 
 # Command mapping for documentation
 KIMARI_COMMAND_MAP = {
-    "kimari compress": "kmc pack [--tensor-aware]",
+    "kimari compress": (
+        "kmc pack [--tensor-aware] [--codec auto|byteplane|floatplane|zstd|zlib|raw]"
+    ),
     "kimari decompress": "kmc unpack",
     "kimari verify-compress": "kmc verify",
-    "kimari bench-compress": "kmc bench [--compare-zipnn]",
+    "kimari bench-compress": "kmc bench [--compare-zipnn] [--compare-codecs]",
 }

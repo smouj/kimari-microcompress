@@ -1,8 +1,8 @@
 """Benchmark utilities for measuring KMC performance.
 
-Compares raw, zlib, zstd and full KMC pack/unpack pipeline.
-Supports console table, JSON output, file export, and optional
-ZipNN comparison.
+Compares raw, zlib, zstd, byteplane, floatplane and full KMC pack/unpack pipeline.
+Supports console table, JSON output, file export, optional ZipNN comparison,
+and per-codec comparison benchmarks.
 
 Environment metadata (Python version, OS, CPU, RAM, KMC version)
 is included in JSON output for reproducibility.
@@ -19,7 +19,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .archive import DEFAULT_BLOCK_SIZE, pack, unpack, verify
-from .codecs import _HAS_ZSTD, RawCodec, ZlibCodec, ZstdCodec
+from .codecs.base import CodecContext
+from .codecs.byteplane import BytePlaneCodec
+from .codecs.floatplane import FloatPlaneCodec
+from .codecs.selector import select_codec
+from .codecs.zlib_codec import ZlibCodec
+from .codecs.zstd_codec import ZstdCodec, is_zstd_available
 from .inspector import ModelFormat, inspect_directory
 
 # ---------------------------------------------------------------------------
@@ -38,7 +43,7 @@ except ImportError:
 # Version
 # ---------------------------------------------------------------------------
 
-_KMC_VERSION = "0.3.0-alpha"
+_KMC_VERSION = "0.4.0-alpha"
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +63,8 @@ class CodecBenchmark:
     decompress_time: float
     compress_throughput: float  # bytes/s
     decompress_throughput: float  # bytes/s
+    applicable: bool = True
+    roundtrip_ok: bool = True
 
 
 @dataclass
@@ -110,6 +117,7 @@ class BenchmarkResult:
     zipnn_benchmark: ZipNNBenchmark | None = None
     environment: EnvironmentInfo | None = None
     tensor_aware: bool = False
+    codec_used: str = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +141,6 @@ def _get_environment_info() -> EnvironmentInfo:
     except Exception:
         pass
 
-    # Try psutil as fallback
     if ram_gb == 0.0:
         try:
             import psutil  # type: ignore[import-untyped]
@@ -157,7 +164,7 @@ def _get_environment_info() -> EnvironmentInfo:
         ram_gb=ram_gb,
         kmc_version=_KMC_VERSION,
         zipnn_version=zipnn_ver,
-        zstd_available=_HAS_ZSTD,
+        zstd_available=is_zstd_available(),
     )
 
 
@@ -170,46 +177,105 @@ def _measure_codec(
     data: bytes,
     codec_name: str,
     level: int = 3,
+    context: CodecContext | None = None,
 ) -> CodecBenchmark | None:
     """Measure compression and decompression for a single codec on data."""
-    if codec_name == "zstd" and not _HAS_ZSTD:
-        return None
-    if codec_name == "zstd":
-        codec = ZstdCodec()
-    elif codec_name == "zlib":
-        codec = ZlibCodec()
-    elif codec_name == "raw":
-        codec = RawCodec()
-    else:
-        return None
+    try:
+        if codec_name == "zstd" and not is_zstd_available():
+            return CodecBenchmark(
+                codec="zstd",
+                original_size=len(data),
+                compressed_size=0,
+                ratio=0.0,
+                compress_time=0.0,
+                decompress_time=0.0,
+                compress_throughput=0.0,
+                decompress_throughput=0.0,
+                applicable=False,
+            )
 
-    # Compress
-    t0 = time.perf_counter()
-    result = codec.compress(data, level=level)
-    compress_time = time.perf_counter() - t0
+        if codec_name == "raw":
+            # Raw is always applicable
+            return CodecBenchmark(
+                codec="raw",
+                original_size=len(data),
+                compressed_size=len(data),
+                ratio=1.0,
+                compress_time=0.0,
+                decompress_time=0.0,
+                compress_throughput=0.0,
+                decompress_throughput=0.0,
+                applicable=True,
+                roundtrip_ok=True,
+            )
 
-    # Only decompress if compression was effective
-    if result.compressed_size < result.original_size or codec_name == "raw":
+        # Use the new codec system (verify roundtrip works)
+        select_codec(
+            data,
+            context=context,
+            codec_override=codec_name,
+            verify_roundtrip=True,
+        )
+
+        # Measure compress time
         t0 = time.perf_counter()
-        codec.decompress(result.data, result.original_size)
+        if codec_name == "zlib":
+            codec = ZlibCodec()
+            cresult = codec.compress(data, context=context)
+        elif codec_name == "zstd":
+            codec = ZstdCodec()
+            cresult = codec.compress(data, context=context)
+        elif codec_name == "byteplane":
+            codec = BytePlaneCodec()
+            cresult = codec.compress(data, context=context)
+        elif codec_name == "floatplane":
+            codec = FloatPlaneCodec()
+            cresult = codec.compress(data, context=context)
+        else:
+            return None
+        compress_time = time.perf_counter() - t0
+
+        # Measure decompress time
+        t0 = time.perf_counter()
+        decomp_ctx = context or CodecContext(original_size=cresult.original_size)
+        decomp_ctx._codec_metadata = cresult.metadata  # type: ignore[attr-defined]
+        decompressed = codec.decompress(cresult.payload, context=decomp_ctx)
         decompress_time = time.perf_counter() - t0
-    else:
-        decompress_time = 0.0
 
-    ratio = result.compressed_size / result.original_size if result.original_size > 0 else 1.0
-    compress_throughput = result.original_size / compress_time if compress_time > 0 else 0
-    decompress_throughput = result.original_size / decompress_time if decompress_time > 0 else 0
+        roundtrip_ok = decompressed == data
+        ratio = (
+            cresult.compressed_size / cresult.original_size if cresult.original_size > 0 else 1.0
+        )
+        compress_throughput = cresult.original_size / compress_time if compress_time > 0 else 0
+        decompress_throughput = (
+            cresult.original_size / decompress_time if decompress_time > 0 else 0
+        )
 
-    return CodecBenchmark(
-        codec=codec_name,
-        original_size=result.original_size,
-        compressed_size=result.compressed_size,
-        ratio=ratio,
-        compress_time=compress_time,
-        decompress_time=decompress_time,
-        compress_throughput=compress_throughput,
-        decompress_throughput=decompress_throughput,
-    )
+        return CodecBenchmark(
+            codec=codec_name,
+            original_size=cresult.original_size,
+            compressed_size=cresult.compressed_size,
+            ratio=ratio,
+            compress_time=compress_time,
+            decompress_time=decompress_time,
+            compress_throughput=compress_throughput,
+            decompress_throughput=decompress_throughput,
+            applicable=True,
+            roundtrip_ok=roundtrip_ok,
+        )
+    except Exception:
+        return CodecBenchmark(
+            codec=codec_name,
+            original_size=len(data),
+            compressed_size=0,
+            ratio=0.0,
+            compress_time=0.0,
+            decompress_time=0.0,
+            compress_throughput=0.0,
+            decompress_throughput=0.0,
+            applicable=False,
+            roundtrip_ok=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -218,20 +284,13 @@ def _measure_codec(
 
 
 def _run_zipnn_benchmark(source: Path, level: int = 3) -> ZipNNBenchmark:
-    """Run ZipNN compression benchmark if available.
-
-    Only benchmarks on compatible files (safetensors, .bin).
-    Returns ZipNNBenchmark with available=False if ZipNN is not installed.
-    """
+    """Run ZipNN compression benchmark if available."""
     if not _HAS_ZIPNN:
-        return ZipNNBenchmark(
-            available=False,
-        )
+        return ZipNNBenchmark(available=False)
 
     try:
         import zipnn  # type: ignore[import-untyped]
 
-        # Collect compatible files
         compatible_files: list[Path] = []
         if source.is_file():
             if source.suffix.lower() in (".safetensors", ".bin"):
@@ -244,7 +303,6 @@ def _run_zipnn_benchmark(source: Path, level: int = 3) -> ZipNNBenchmark:
         if not compatible_files:
             return ZipNNBenchmark(available=True, ratio=0.0, version=zipnn.__version__)
 
-        # Measure compression on compatible files
         total_original = 0
         total_compressed = 0
         total_compress_time = 0.0
@@ -254,13 +312,11 @@ def _run_zipnn_benchmark(source: Path, level: int = 3) -> ZipNNBenchmark:
             data = f.read_bytes()
             total_original += len(data)
 
-            # Compress
             t0 = time.perf_counter()
             compressed = zipnn.compress_data(data)  # type: ignore[attr-defined]
             total_compress_time += time.perf_counter() - t0
             total_compressed += len(compressed) if compressed else len(data)
 
-            # Decompress
             if compressed and len(compressed) < len(data):
                 t0 = time.perf_counter()
                 try:
@@ -280,10 +336,7 @@ def _run_zipnn_benchmark(source: Path, level: int = 3) -> ZipNNBenchmark:
             version=zipnn.__version__,
         )
     except Exception as e:
-        return ZipNNBenchmark(
-            available=True,
-            version=f"error: {e}",
-        )
+        return ZipNNBenchmark(available=True, version=f"error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +352,8 @@ def run_benchmark(
     synthetic: bool = False,
     tensor_aware: bool = False,
     compare_zipnn: bool = False,
+    compare_codecs: bool = False,
+    codec: str = "auto",
 ) -> BenchmarkResult:
     """Run a complete benchmark: codec comparison + KMC pipeline + optional ZipNN.
 
@@ -310,6 +365,8 @@ def run_benchmark(
         synthetic: Whether the data is synthetic (mark in report).
         tensor_aware: Use tensor-aware compression mode.
         compare_zipnn: Compare with ZipNN if available.
+        compare_codecs: Compare all available codecs.
+        codec: Codec to use for the main KMC pipeline.
 
     Returns:
         BenchmarkResult with all measurements.
@@ -338,26 +395,38 @@ def run_benchmark(
         insp = inspect_file(source)
         detected_formats = [insp.format.value] if insp.format != ModelFormat.UNKNOWN else []
 
-    # Per-codec benchmarks on first 1 MB of data
-    codec_results: list[CodecBenchmark] = []
+    # Sample data for codec benchmarks
     sample_data = b""
     if source.is_file():
         with open(source, "rb") as f:
-            sample_data = f.read(1024 * 1024)  # 1 MB sample
+            sample_data = f.read(1024 * 1024)
     else:
         for f in sorted(source.rglob("*")):
             if f.is_file() and len(sample_data) < 1024 * 1024:
                 with open(f, "rb") as fh:
                     sample_data += fh.read(1024 * 1024 - len(sample_data))
 
-    for codec_name in ["raw", "zlib", "zstd"]:
-        result = _measure_codec(sample_data, codec_name, level=level)
+    # Build codec context for sample data
+    sample_context = CodecContext(original_size=len(sample_data))
+
+    # Per-codec benchmarks
+    codec_names = ["raw", "zlib"]
+    if is_zstd_available():
+        codec_names.append("zstd")
+
+    if compare_codecs:
+        # Add tensor-aware codecs
+        codec_names.extend(["byteplane", "floatplane"])
+
+    codec_results: list[CodecBenchmark] = []
+    for cn in codec_names:
+        result = _measure_codec(sample_data, cn, level=level, context=sample_context)
         if result is not None:
             codec_results.append(result)
 
     # KMC pack
     t0 = time.perf_counter()
-    pack(source, output, block_size=block_size, level=level, tensor_aware=tensor_aware)
+    pack(source, output, block_size=block_size, level=level, tensor_aware=tensor_aware, codec=codec)
     pack_time = time.perf_counter() - t0
     comp_size = output.stat().st_size
 
@@ -378,7 +447,6 @@ def run_benchmark(
     pack_throughput = orig_size / pack_time if pack_time > 0 else 0
     unpack_throughput = orig_size / unpack_time if unpack_time > 0 else 0
 
-    # Estimate block count from the archive manifest
     from .archive import read_manifest_from_archive
 
     manifest, _ = read_manifest_from_archive(output)
@@ -411,6 +479,7 @@ def run_benchmark(
         zipnn_benchmark=zipnn_bench,
         environment=env_info,
         tensor_aware=tensor_aware,
+        codec_used=codec,
     )
 
 
@@ -428,6 +497,7 @@ def format_benchmark_table(result: BenchmarkResult) -> str:
         f"KMC version: {result.kmc_version}",
         f"Data type: {'SYNTHETIC' if result.synthetic else 'REAL'}",
         f"Tensor-aware: {'yes' if result.tensor_aware else 'no'}",
+        f"Codec: {result.codec_used}",
         f"Original size: {result.original_size:,} bytes",
         f"Files: {result.num_files}",
         f"Blocks: {result.num_blocks} (block_size={result.block_size:,})",
@@ -438,19 +508,28 @@ def format_benchmark_table(result: BenchmarkResult) -> str:
 
     # Table header
     lines.append(
-        f"  {'Codec':<8} {'Compressed':>12} {'Ratio':>8} "
+        f"  {'Codec':<12} {'Compressed':>12} {'Ratio':>8} "
         f"{'Comp(s)':>10} {'Decomp(s)':>10} "
-        f"{'CompMB/s':>10} {'DecompMB/s':>10}"
+        f"{'CompMB/s':>10} {'DecompMB/s':>12} {'OK':>3}"
     )
-    lines.append(f"  {'-' * 8} {'-' * 12} {'-' * 8} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 10}")
+    lines.append(
+        f"  {'-' * 12} {'-' * 12} {'-' * 8} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 12} {'-' * 3}"
+    )
 
     for cb in result.codec_benchmarks:
-        lines.append(
-            f"  {cb.codec:<8} {cb.compressed_size:>12,} {cb.ratio:>7.2%} "
-            f"{cb.compress_time:>10.4f} {cb.decompress_time:>10.4f} "
-            f"{cb.compress_throughput / 1024 / 1024:>10.2f} "
-            f"{cb.decompress_throughput / 1024 / 1024:>10.2f}"
-        )
+        status = "Y" if cb.roundtrip_ok else "N"
+        if not cb.applicable:
+            lines.append(
+                f"  {cb.codec:<12} {'N/A':>12} {'N/A':>8} "
+                f"{'N/A':>10} {'N/A':>10} {'N/A':>10} {'N/A':>12} {'-':>3}"
+            )
+        else:
+            lines.append(
+                f"  {cb.codec:<12} {cb.compressed_size:>12,} {cb.ratio:>7.2%} "
+                f"{cb.compress_time:>10.4f} {cb.decompress_time:>10.4f} "
+                f"{cb.compress_throughput / 1024 / 1024:>10.2f} "
+                f"{cb.decompress_throughput / 1024 / 1024:>12.2f} {status:>3}"
+            )
 
     lines.extend(
         [
@@ -480,23 +559,8 @@ def format_benchmark_table(result: BenchmarkResult) -> str:
                 lines.append(f"  ZipNN ratio: {zb.ratio:.2%}")
                 lines.append(f"  ZipNN compress time: {zb.compress_seconds:.3f}s")
                 lines.append(f"  ZipNN decompress time: {zb.decompress_seconds:.3f}s")
-
-                # Comparison note
-                if result.kmc_ratio < zb.ratio:
-                    lines.append(
-                        f"  Note: KMC ratio ({result.kmc_ratio:.2%}) is better than "
-                        f"ZipNN ({zb.ratio:.2%})"
-                    )
-                elif result.kmc_ratio > zb.ratio:
-                    lines.append(
-                        f"  Note: ZipNN ratio ({zb.ratio:.2%}) is better than "
-                        f"KMC ({result.kmc_ratio:.2%})"
-                    )
-                else:
-                    lines.append("  Note: KMC and ZipNN ratios are comparable")
             else:
                 lines.append("  ZipNN: no compatible files found for benchmark")
-
         lines.append("  Disclaimer: This is a measurement, not a claim of superiority.")
 
     # Environment info

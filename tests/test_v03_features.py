@@ -346,7 +346,7 @@ class TestBenchmarkZipNNAbsent:
 
         assert result.environment is not None
         assert result.environment.python_version != ""
-        assert result.environment.kmc_version == "0.3.0-alpha"
+        assert result.environment.kmc_version == "0.4.0-alpha"
 
     def test_benchmark_tensor_aware_flag(self, tmp_path: Path):
         """Benchmark with tensor_aware flag."""

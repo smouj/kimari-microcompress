@@ -5,6 +5,11 @@ KMC file format layout:
     [Manifest length: 8 bytes, big-endian uint64]
     [Manifest: JSON, UTF-8 encoded]
     [Block data: concatenated compressed blocks]
+
+v0.4 additions:
+    - Per-block codec metadata stored in manifest
+    - --codec flag supports: auto, byteplane, floatplane, zstd, zlib, raw
+    - Tensor-aware mode now applies dtype-specific codecs
 """
 
 from __future__ import annotations
@@ -17,7 +22,9 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from .codecs import CodecId, compress_block, decompress_block
+from .codecs.base import CodecContext
+from .codecs.selector import select_codec
+from .codecs.zstd_codec import is_zstd_available
 from .hashing import sha256_block, sha256_file
 from .manifest import BlockEntry, FileEntry, KMCManifest, TensorEntry
 
@@ -45,48 +52,31 @@ def safe_join_extract_path(output_dir: Path, relative_path: str) -> Path:
 
     Guarantees that the resulting path is strictly within ``output_dir``.
     Raises ``ExtractionError`` for any unsafe path component.
-
-    Checks performed:
-    - No empty or whitespace-only path components.
-    - No absolute paths (leading ``/`` or drive letters).
-    - No ``..`` components that would escape the output directory.
-    - No null bytes or other control characters.
-    - No duplicate file entries (caller must check separately).
-    - Final resolved path must start with the output directory prefix.
     """
-    # Reject null bytes and control characters
     if "\x00" in relative_path:
         raise ExtractionError(f"Null byte in path: {relative_path!r}")
     if any(ord(c) < 0x20 for c in relative_path):
         raise ExtractionError(f"Control character in path: {relative_path!r}")
 
-    # Reject empty or whitespace-only paths
     stripped = relative_path.strip()
     if not stripped:
         raise ExtractionError("Empty or whitespace-only path in manifest")
 
-    # Reject absolute paths
     if relative_path.startswith("/"):
         raise ExtractionError(f"Absolute path not allowed: {relative_path!r}")
-    # Windows-style absolute paths
     if len(relative_path) >= 2 and relative_path[1] == ":":
         raise ExtractionError(f"Windows-style absolute path not allowed: {relative_path!r}")
 
-    # Check for consecutive slashes (before PurePosixPath normalizes them)
     if "//" in relative_path:
         raise ExtractionError(f"Empty path component (consecutive slashes): {relative_path!r}")
 
-    # Parse with PurePosixPath and reject '..' components
     parts = PurePosixPath(relative_path).parts
     if ".." in parts:
         raise ExtractionError(f"Path traversal ('..') not allowed: {relative_path!r}")
 
-    # Resolve and verify it stays within output_dir
     output_dir = output_dir.resolve()
     candidate = (output_dir / relative_path).resolve()
 
-    # The resolved path must be within output_dir
-    # Use os.path.commonpath to handle edge cases
     try:
         common = os.path.commonpath([str(output_dir), str(candidate)])
         if common != str(output_dir):
@@ -95,7 +85,6 @@ def safe_join_extract_path(output_dir: Path, relative_path: str) -> Path:
                 f"resolves to {candidate!r} (outside {output_dir!r})"
             )
     except ValueError:
-        # Different drives on Windows
         raise ExtractionError(f"Path escapes output directory: {relative_path!r}")
 
     return candidate
@@ -119,7 +108,7 @@ class VerificationReport:
     total_blocks: int = 0
     compressed_size: int = 0
     restored_size: int = 0
-    integrity: str = "OK"  # OK or FAILED
+    integrity: str = "OK"
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -158,57 +147,45 @@ class VerificationReport:
 
 
 def validate_manifest(manifest: KMCManifest) -> list[str]:
-    """Validate a manifest for structural correctness and security.
-
-    Returns a list of errors found. Empty list means the manifest is valid.
-    """
+    """Validate a manifest for structural correctness and security."""
     errors: list[str] = []
-    supported_codecs = {c.value for c in CodecId}
+    supported_codecs = {"zstd", "zlib", "raw", "byteplane", "floatplane"}
     seen_paths: set[str] = set()
 
     for file_entry in manifest.files:
-        # Check for duplicate paths
         if file_entry.path in seen_paths:
             errors.append(f"Duplicate path in manifest: {file_entry.path!r}")
         seen_paths.add(file_entry.path)
 
-        # Check path safety
         try:
-            # Use a dummy output dir just for validation
             safe_join_extract_path(Path("/tmp/kmc_check"), file_entry.path)
         except ExtractionError as e:
             errors.append(f"Unsafe path in manifest: {file_entry.path!r} — {e}")
 
-        # Check original_size
         if file_entry.original_size < 0:
             errors.append(
                 f"Negative original_size for '{file_entry.path}': {file_entry.original_size}"
             )
 
-        # Check block count consistency
         if file_entry.original_size == 0 and file_entry.blocks:
             errors.append(
                 f"File '{file_entry.path}' has zero original_size but "
                 f"{len(file_entry.blocks)} block(s)"
             )
 
-        # Check blocks
         block_indices: set[int] = set()
         total_block_original = 0
         for block in file_entry.blocks:
-            # Check for duplicate block indices
             if block.index in block_indices:
                 errors.append(f"Duplicate block index {block.index} in '{file_entry.path}'")
             block_indices.add(block.index)
 
-            # Check codec is supported
             if block.codec not in supported_codecs:
                 errors.append(
                     f"Unsupported codec '{block.codec}' in block "
                     f"{block.index} of '{file_entry.path}'"
                 )
 
-            # Check sizes
             if block.compressed_size < 0:
                 errors.append(
                     f"Negative compressed_size in block {block.index} of '{file_entry.path}'"
@@ -219,7 +196,6 @@ def validate_manifest(manifest: KMCManifest) -> list[str]:
                 )
             total_block_original += block.original_size
 
-        # Check total block original size matches file original size
         if file_entry.original_size > 0 and total_block_original != file_entry.original_size:
             errors.append(
                 f"Block size mismatch for '{file_entry.path}': "
@@ -236,12 +212,7 @@ def validate_manifest(manifest: KMCManifest) -> list[str]:
 
 
 def _get_safetensors_tensor_entries(path: Path) -> tuple[list[TensorEntry], list[str], int]:
-    """Try to read safetensors tensor metadata from a file.
-
-    Returns (tensor_entries, dtype_summary, tensor_count).
-    Returns empty lists/zero if the file is not safetensors or metadata
-    cannot be read.
-    """
+    """Try to read safetensors tensor metadata from a file."""
     if path.suffix.lower() != ".safetensors":
         return [], [], 0
 
@@ -270,18 +241,8 @@ def _compute_tensor_aware_block_boundaries(
     tensor_entries: list[TensorEntry],
     header_size: int = 0,
 ) -> list[int]:
-    """Compute block split points that try to align with tensor boundaries.
-
-    When tensor metadata is available, we attempt to avoid splitting a tensor
-    across two blocks when it fits within a single block or when the waste
-    from alignment is small (< 10% of block_size).
-
-    If no tensor entries are provided, falls back to simple block_size intervals.
-
-    Returns a list of byte offsets where blocks should start.
-    """
+    """Compute block split points that try to align with tensor boundaries."""
     if not tensor_entries:
-        # No tensor info: simple fixed-size blocks
         boundaries = []
         offset = 0
         while offset < file_size:
@@ -289,32 +250,22 @@ def _compute_tensor_aware_block_boundaries(
             offset += block_size
         return boundaries
 
-    # Compute ideal boundaries based on tensor start offsets
-    # The data region starts after the safetensors header
-
     boundaries: list[int] = []
-    current_block_start = 0  # Relative to data start
+    current_block_start = 0
 
     for tensor in sorted(tensor_entries, key=lambda t: t.byte_offset):
-        tensor_start = tensor.byte_offset  # Already relative to data start
+        tensor_start = tensor.byte_offset
 
         if tensor_start < current_block_start:
-            # Tensor starts within current block (overlapping)
             continue
 
-        # If the gap between current_block_start and tensor_start is small
-        # enough to be reasonable waste, snap to tensor boundary
         gap = tensor_start - current_block_start
 
         if gap > 0 and gap <= block_size:
-            # Check if snapping is worth it (don't waste more than 10% of block)
             if gap <= block_size * 0.1:
-                # Start a new block at the tensor boundary
                 if boundaries:
                     boundaries.append(tensor_start)
                 else:
-                    # First block starts at 0, but if tensor starts later,
-                    # we still start at 0 and let the next block align
                     if tensor_start < block_size:
                         boundaries.append(0)
                     else:
@@ -322,36 +273,29 @@ def _compute_tensor_aware_block_boundaries(
                         boundaries.append(tensor_start)
                 current_block_start = tensor_start
             else:
-                # Not worth snapping, fill the gap with a block
                 boundaries.append(current_block_start)
                 current_block_start += block_size
-                # Then try to align again
                 if tensor_start > current_block_start:
                     boundaries.append(tensor_start)
                     current_block_start = tensor_start
         elif gap > block_size:
-            # Large gap: fill with regular blocks, then snap to tensor
             while current_block_start + block_size <= tensor_start:
                 boundaries.append(current_block_start)
                 current_block_start += block_size
-            # Snap to tensor
             if current_block_start < tensor_start:
                 boundaries.append(current_block_start)
                 current_block_start = tensor_start
                 if current_block_start < file_size:
                     boundaries.append(tensor_start)
         else:
-            # gap == 0: already aligned
             if not boundaries or current_block_start == 0:
                 boundaries.append(current_block_start)
             current_block_start = max(current_block_start, tensor_start)
 
-    # Fill remaining with regular blocks
     while current_block_start < file_size:
         boundaries.append(current_block_start)
         current_block_start += block_size
 
-    # Deduplicate and sort
     seen = set()
     result = []
     for b in boundaries:
@@ -361,6 +305,87 @@ def _compute_tensor_aware_block_boundaries(
     result.sort()
 
     return result
+
+
+def _find_tensor_for_offset(
+    offset: int, tensor_entries: list[TensorEntry], header_size: int = 0
+) -> TensorEntry | None:
+    """Find the tensor entry that contains the given file offset."""
+    for t in tensor_entries:
+        data_start = header_size + t.byte_offset
+        data_end = data_start + t.byte_size
+        if data_start <= offset < data_end:
+            return t
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Compress/decompress blocks with new codec system
+# ---------------------------------------------------------------------------
+
+
+def _compress_block_with_codec(
+    data: bytes,
+    codec_name: str = "auto",
+    context: CodecContext | None = None,
+) -> tuple[bytes, str, dict]:
+    """Compress a block using the specified codec.
+
+    Returns (compressed_payload, codec_name_used, codec_metadata).
+    """
+    if codec_name == "auto":
+        selection = select_codec(data, context=context, codec_override=None)
+        result = selection.result
+        return result.payload, result.codec, result.metadata
+
+    # Specific codec requested
+    selection = select_codec(data, context=context, codec_override=codec_name)
+    result = selection.result
+    return result.payload, result.codec, result.metadata
+
+
+def _decompress_block_with_metadata(
+    payload: bytes,
+    codec_name: str,
+    original_size: int,
+    codec_metadata: dict | None = None,
+) -> bytes:
+    """Decompress a block using the specified codec and metadata.
+
+    Handles both legacy codecs (zstd, zlib, raw) and new codecs
+    (byteplane, floatplane) that require metadata for decompression.
+    """
+    if codec_name in ("zstd", "zlib", "raw"):
+        # Use legacy decompression for v0.2/v0.3 compatible blocks
+        from .codecs.legacy import CodecId, decompress_block
+
+        try:
+            codec_id = CodecId(codec_name)
+        except ValueError:
+            codec_id = codec_name
+        result = decompress_block(payload, codec_id, original_size)
+        return result.data
+
+    # New codecs require metadata
+    if codec_name == "byteplane":
+        from .codecs.byteplane import BytePlaneCodec
+
+        bp = BytePlaneCodec()
+        ctx = CodecContext(original_size=original_size)
+        if codec_metadata:
+            ctx._codec_metadata = codec_metadata  # type: ignore[attr-defined]
+        return bp.decompress(payload, context=ctx)
+
+    if codec_name == "floatplane":
+        from .codecs.floatplane import FloatPlaneCodec
+
+        fp = FloatPlaneCodec()
+        ctx = CodecContext(original_size=original_size)
+        if codec_metadata:
+            ctx._codec_metadata = codec_metadata  # type: ignore[attr-defined]
+        return fp.decompress(payload, context=ctx)
+
+    raise ValueError(f"Unsupported codec for decompression: {codec_name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +399,7 @@ def pack(
     block_size: int = DEFAULT_BLOCK_SIZE,
     level: int = 3,
     tensor_aware: bool = False,
+    codec: str = "auto",
 ) -> None:
     """Pack a directory or single file into a .kmc archive.
 
@@ -384,6 +410,7 @@ def pack(
         level: Compression level (codec-dependent).
         tensor_aware: If True, attempt to align blocks to tensor boundaries
             for safetensors files and record tensor metadata in the manifest.
+        codec: Codec to use: 'auto', 'byteplane', 'floatplane', 'zstd', 'zlib', 'raw'.
     """
     source = Path(source).resolve()
     output = Path(output).resolve()
@@ -391,11 +418,13 @@ def pack(
     if not source.exists():
         raise FileNotFoundError(f"Source not found: {source}")
 
+    # Validate codec choice
+    _validate_codec_choice(codec, tensor_aware)
+
     manifest = KMCManifest(
         created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
 
-    # Collect all compressed blocks and their metadata
     all_blocks: list[tuple[int, int, BlockEntry, bytes]] = []
 
     files_to_pack: list[Path] = []
@@ -418,9 +447,18 @@ def pack(
         tensor_entries: list[TensorEntry] = []
         dtype_summary: list[str] = []
         tensor_count = 0
+        header_size = 0
 
         if tensor_aware:
             tensor_entries, dtype_summary, tensor_count = _get_safetensors_tensor_entries(fpath)
+            if tensor_entries:
+                try:
+                    from .formats.safetensors import read_safetensors_info
+
+                    info = read_safetensors_info(fpath)
+                    header_size = info.header_size
+                except (ValueError, OSError):
+                    pass
 
         file_entry = FileEntry(
             path=rel_str,
@@ -434,26 +472,14 @@ def pack(
 
         # Compute block boundaries
         if tensor_aware and tensor_entries:
-            # Get header size for offset calculation
-            header_size = 0
-            try:
-                from .formats.safetensors import read_safetensors_info
-
-                info = read_safetensors_info(fpath)
-                header_size = info.header_size
-            except (ValueError, OSError):
-                pass
-
             block_starts = _compute_tensor_aware_block_boundaries(
                 file_size, block_size, tensor_entries, header_size
             )
         else:
-            # Standard fixed-size blocks
             block_starts = list(range(0, file_size, block_size))
 
         with open(fpath, "rb") as f:
             for block_index, block_start in enumerate(block_starts):
-                # Determine how much to read for this block
                 if block_index + 1 < len(block_starts):
                     chunk_size = block_starts[block_index + 1] - block_start
                 else:
@@ -464,22 +490,53 @@ def pack(
                 if not chunk:
                     break
 
-                compressed = compress_block(chunk, level=level)
-                block_hash = sha256_block(compressed.data)
+                # Determine tensor context for this block
+                tensor_name = ""
+                tensor_dtype = ""
+                tensor_shape: list[int] = []
+                if tensor_aware and tensor_entries:
+                    t = _find_tensor_for_offset(block_start, tensor_entries, header_size)
+                    if t:
+                        tensor_name = t.name
+                        tensor_dtype = t.dtype
+                        tensor_shape = t.shape
+
+                # Build codec context
+                ctx = CodecContext(
+                    file_path=rel_str,
+                    tensor_name=tensor_name or None,
+                    dtype=tensor_dtype or None,
+                    shape=tensor_shape or None,
+                    original_size=len(chunk),
+                    block_index=block_index,
+                )
+
+                # Compress with selected codec
+                compressed_payload, codec_used, codec_meta = _compress_block_with_codec(
+                    chunk, codec_name=codec, context=ctx
+                )
+
+                block_hash = sha256_block(compressed_payload)
 
                 block_entry = BlockEntry(
                     index=block_index,
                     offset=0,  # placeholder, fixed below
-                    compressed_size=compressed.compressed_size,
-                    original_size=compressed.original_size,
-                    codec=compressed.codec.value,
+                    compressed_size=len(compressed_payload),
+                    original_size=len(chunk),
+                    codec=codec_used,
                     hash=block_hash,
+                    codec_metadata=codec_meta,
+                    tensor_name=tensor_name,
+                    tensor_dtype=tensor_dtype,
+                    tensor_shape=tensor_shape,
                 )
                 file_entry.blocks.append(block_entry)
-                all_blocks.append((len(manifest.files), block_index, block_entry, compressed.data))
+                all_blocks.append(
+                    (len(manifest.files), block_index, block_entry, compressed_payload)
+                )
 
-                manifest.total_original_size += compressed.original_size
-                manifest.total_compressed_size += compressed.compressed_size
+                manifest.total_original_size += len(chunk)
+                manifest.total_compressed_size += len(compressed_payload)
 
         manifest.files.append(file_entry)
 
@@ -508,17 +565,29 @@ def pack(
             out.write(block_data)
 
 
+def _validate_codec_choice(codec: str, tensor_aware: bool) -> None:
+    """Validate that the codec choice is compatible with other options."""
+    valid_codecs = {"auto", "raw", "zlib", "zstd", "byteplane", "floatplane"}
+    if codec not in valid_codecs:
+        raise ValueError(f"Unknown codec: {codec!r}. Valid options: {sorted(valid_codecs)}")
+
+    if codec in ("byteplane", "floatplane") and not tensor_aware:
+        # byteplane/floatplane can work without tensor_aware,
+        # but they need dtype information for best results
+        pass  # Allow it but user should know
+
+    if codec == "floatplane" and not is_zstd_available():
+        # floatplane works with zlib inner too, so just warn silently
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Read manifest
 # ---------------------------------------------------------------------------
 
 
 def read_manifest_from_archive(archive: Path) -> tuple[KMCManifest, int]:
-    """Read the manifest from a .kmc archive.
-
-    Returns:
-        Tuple of (manifest, data_start_offset).
-    """
+    """Read the manifest from a .kmc archive."""
     with open(archive, "rb") as f:
         magic = f.read(KMC_MAGIC_LEN)
         if magic != KMC_MAGIC:
@@ -538,7 +607,6 @@ def read_manifest_from_archive(archive: Path) -> tuple[KMCManifest, int]:
         if len(manifest_raw) < manifest_len:
             raise ValueError("Truncated manifest data")
 
-        # Validate JSON
         try:
             json.loads(manifest_raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -554,32 +622,16 @@ def read_manifest_from_archive(archive: Path) -> tuple[KMCManifest, int]:
 
 
 def verify(archive: Path) -> list[str]:
-    """Verify the integrity of a .kmc archive.
-
-    Returns a list of errors found. Empty list means the archive is valid.
-    """
+    """Verify the integrity of a .kmc archive."""
     report = verify_full(archive)
     return report.errors
 
 
 def verify_full(archive: Path) -> VerificationReport:
-    """Perform a full verification of a .kmc archive and return a report.
-
-    Checks:
-    - Magic header
-    - Format version
-    - Manifest size bounds
-    - Manifest JSON validity
-    - Manifest structural validation (paths, codecs, sizes)
-    - Block checksums
-    - File hash reconstruction
-    - Block count consistency
-    - Size coherence
-    """
+    """Perform a full verification of a .kmc archive and return a report."""
     archive = Path(archive).resolve()
     report = VerificationReport(archive_path=str(archive))
 
-    # Read manifest
     try:
         manifest, data_start = read_manifest_from_archive(archive)
     except (ValueError, OSError) as e:
@@ -596,18 +648,15 @@ def verify_full(archive: Path) -> VerificationReport:
     report.compressed_size = manifest.total_compressed_size
     report.restored_size = manifest.total_original_size
 
-    # Check format version
-    if manifest.version not in (1, 2):
-        report.warnings.append(f"Unknown manifest version: v{manifest.version}, expected v1 or v2")
+    if manifest.version not in (1, 2, 3):
+        report.warnings.append(f"Unknown manifest version: v{manifest.version}")
 
-    # Validate manifest structure
     structural_errors = validate_manifest(manifest)
     if structural_errors:
         report.integrity = "FAILED"
         report.errors.extend(structural_errors)
         return report
 
-    # Verify blocks and checksums
     archive_size = archive.stat().st_size
     with open(archive, "rb") as f:
         for file_entry in manifest.files:
@@ -615,14 +664,10 @@ def verify_full(archive: Path) -> VerificationReport:
             file_reconstructed_size = 0
 
             for block in sorted(file_entry.blocks, key=lambda b: b.index):
-                # Check block offset is within archive
                 if block.offset + block.compressed_size > archive_size:
                     report.integrity = "FAILED"
                     report.errors.append(
-                        f"Block {block.index} of '{file_entry.path}' "
-                        f"exceeds archive size (offset={block.offset}, "
-                        f"size={block.compressed_size}, "
-                        f"archive={archive_size})"
+                        f"Block {block.index} of '{file_entry.path}' exceeds archive size"
                     )
                     continue
 
@@ -637,23 +682,23 @@ def verify_full(archive: Path) -> VerificationReport:
                     )
                     continue
 
-                # Verify block hash
                 actual_hash = sha256_block(block_data)
                 if actual_hash != block.hash:
                     report.integrity = "FAILED"
                     report.errors.append(
-                        f"Block {block.index} of '{file_entry.path}': "
-                        f"checksum mismatch (expected={block.hash}, "
-                        f"got={actual_hash})"
+                        f"Block {block.index} of '{file_entry.path}': checksum mismatch"
                     )
                     continue
 
-                # Decompress to verify file hash
                 try:
-                    codec_id = CodecId(block.codec)
-                    decompressed = decompress_block(block_data, codec_id, block.original_size)
-                    file_hasher.update(decompressed.data)
-                    file_reconstructed_size += len(decompressed.data)
+                    decompressed = _decompress_block_with_metadata(
+                        block_data,
+                        block.codec,
+                        block.original_size,
+                        block.codec_metadata,
+                    )
+                    file_hasher.update(decompressed)
+                    file_reconstructed_size += len(decompressed)
                 except Exception as e:
                     report.integrity = "FAILED"
                     report.errors.append(
@@ -661,16 +706,11 @@ def verify_full(archive: Path) -> VerificationReport:
                     )
                     continue
 
-            # Verify file hash (only if no block errors so far)
             if file_reconstructed_size == file_entry.original_size:
                 actual_file_hash = file_hasher.hexdigest()
                 if actual_file_hash != file_entry.hash:
                     report.integrity = "FAILED"
-                    report.errors.append(
-                        f"File '{file_entry.path}': hash mismatch "
-                        f"(expected={file_entry.hash}, "
-                        f"got={actual_file_hash})"
-                    )
+                    report.errors.append(f"File '{file_entry.path}': hash mismatch")
             elif file_reconstructed_size > 0:
                 report.integrity = "FAILED"
                 report.errors.append(
@@ -688,33 +728,19 @@ def verify_full(archive: Path) -> VerificationReport:
 
 
 def unpack(archive: Path, output_dir: Path) -> None:
-    """Unpack a .kmc archive to a directory.
-
-    Args:
-        archive: Path to the .kmc archive.
-        output_dir: Output directory (created if it doesn't exist).
-
-    Raises:
-        ExtractionError: If any path in the manifest is unsafe.
-        ValueError: If integrity checks fail during unpack.
-    """
+    """Unpack a .kmc archive to a directory."""
     archive = Path(archive).resolve()
     output_dir = Path(output_dir).resolve()
 
     manifest, data_start = read_manifest_from_archive(archive)
 
-    # Pre-validate all paths before writing anything
     seen_paths: set[str] = set()
     for file_entry in manifest.files:
-        # Check for duplicate paths
         if file_entry.path in seen_paths:
             raise ExtractionError(f"Duplicate path in manifest: {file_entry.path!r}")
         seen_paths.add(file_entry.path)
-
-        # Validate path safety
         safe_join_extract_path(output_dir, file_entry.path)
 
-    # Validate manifest structure
     structural_errors = validate_manifest(manifest)
     if structural_errors:
         raise ValueError(f"Manifest validation failed: {'; '.join(structural_errors)}")
@@ -724,10 +750,8 @@ def unpack(archive: Path, output_dir: Path) -> None:
     with open(archive, "rb") as f:
         for file_entry in manifest.files:
             out_path = safe_join_extract_path(output_dir, file_entry.path)
-
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Check for symlinks — do not follow or overwrite them
             if out_path.is_symlink():
                 raise ExtractionError(f"Refusing to overwrite symlink: {out_path}")
 
@@ -738,7 +762,6 @@ def unpack(archive: Path, output_dir: Path) -> None:
                     f.seek(block.offset)
                     block_data = f.read(block.compressed_size)
 
-                    # Verify block hash before decompression
                     actual_hash = sha256_block(block_data)
                     if actual_hash != block.hash:
                         raise ValueError(
@@ -747,12 +770,15 @@ def unpack(archive: Path, output_dir: Path) -> None:
                             f"checksum mismatch during unpack"
                         )
 
-                    codec_id = CodecId(block.codec)
-                    decompressed = decompress_block(block_data, codec_id, block.original_size)
-                    out_f.write(decompressed.data)
-                    file_hasher.update(decompressed.data)
+                    decompressed = _decompress_block_with_metadata(
+                        block_data,
+                        block.codec,
+                        block.original_size,
+                        block.codec_metadata,
+                    )
+                    out_f.write(decompressed)
+                    file_hasher.update(decompressed)
 
-                # Verify file hash
                 actual_file_hash = file_hasher.hexdigest()
                 if actual_file_hash != file_entry.hash:
                     raise ValueError(

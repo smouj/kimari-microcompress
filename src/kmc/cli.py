@@ -24,15 +24,26 @@ def cmd_pack(args: argparse.Namespace) -> None:
     block_size = args.block_size or DEFAULT_BLOCK_SIZE
     level = args.level
     tensor_aware = getattr(args, "tensor_aware", False)
+    codec = getattr(args, "codec", "auto")
 
     if not source.exists():
         print(f"Error: source not found: {source}", file=sys.stderr)
         sys.exit(1)
 
+    # Validate codec choice
+    valid_codecs = {"auto", "raw", "zlib", "zstd", "byteplane", "floatplane"}
+    if codec not in valid_codecs:
+        print(f"Error: unknown codec '{codec}'. Valid: {sorted(valid_codecs)}", file=sys.stderr)
+        sys.exit(1)
+
     mode_str = " (tensor-aware)" if tensor_aware else ""
-    print(f"Packing {source} -> {output}{mode_str} (block_size={block_size}, level={level})")
+    codec_str = f" --codec {codec}" if codec != "auto" else ""
+    print(
+        f"Packing {source} -> {output}{mode_str}{codec_str} "
+        f"(block_size={block_size}, level={level})"
+    )
     start = time.time()
-    pack(source, output, block_size=block_size, level=level, tensor_aware=tensor_aware)
+    pack(source, output, block_size=block_size, level=level, tensor_aware=tensor_aware, codec=codec)
     elapsed = time.time() - start
 
     orig = (
@@ -89,10 +100,16 @@ def cmd_inspect(args: argparse.Namespace) -> None:
 
     show_tensors = getattr(args, "tensors", False)
     json_output = getattr(args, "json", False)
+    show_compression = getattr(args, "compression", False)
 
     # If it's a .kmc archive, show archive manifest
     if target.is_file() and target.suffix.lower() == ".kmc":
-        _inspect_archive(target, json_output=json_output, show_tensors=show_tensors)
+        _inspect_archive(
+            target,
+            json_output=json_output,
+            show_tensors=show_tensors,
+            show_compression=show_compression,
+        )
     else:
         _inspect_model(target, json_output=json_output, show_tensors=show_tensors)
 
@@ -108,7 +125,12 @@ def _format_size(n: int) -> str:
     return f"{n} bytes"
 
 
-def _inspect_archive(archive: Path, json_output: bool = False, show_tensors: bool = False) -> None:
+def _inspect_archive(
+    archive: Path,
+    json_output: bool = False,
+    show_tensors: bool = False,
+    show_compression: bool = False,
+) -> None:
     """Display archive manifest information."""
     manifest = inspect(archive)
 
@@ -151,7 +173,14 @@ def _inspect_archive(archive: Path, json_output: bool = False, show_tensors: boo
                     }
                     for t in fentry.tensor_entries
                 ]
+            if show_compression:
+                file_data["compression_summary"] = _get_compression_summary(fentry)
             data["files"].append(file_data)
+
+        # Add overall compression summary
+        if show_compression:
+            data["compression_summary"] = _get_overall_compression_summary(manifest)
+
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return
 
@@ -171,6 +200,29 @@ def _inspect_archive(archive: Path, json_output: bool = False, show_tensors: boo
     print(f"  Files: {len(manifest.files)}")
     print()
 
+    # Show compression summary if requested
+    if show_compression:
+        summary = _get_overall_compression_summary(manifest)
+        print("Compression summary:")
+        print(f"  Files: {summary.get('files', 0)}")
+        print(f"  Blocks: {summary.get('blocks', 0)}")
+        codec_usage = summary.get("codec_usage", {})
+        if codec_usage:
+            print("  Codec usage:")
+            for codec_name, count in sorted(codec_usage.items()):
+                print(f"    {codec_name}: {count} blocks")
+        tensor_aware = summary.get("tensor_aware", False)
+        if tensor_aware:
+            print("  Tensor-aware: yes")
+            tensor_dtypes = summary.get("tensor_dtypes", {})
+            if tensor_dtypes:
+                print("  Tensor dtypes:")
+                for dtype, count in sorted(tensor_dtypes.items()):
+                    print(f"    {dtype}: {count} tensors")
+        else:
+            print("  Tensor-aware: no")
+        print()
+
     for fentry in manifest.files:
         print(f"  {fentry.path}")
         print(f"    Size: {_format_size(fentry.original_size)} | Hash: {fentry.hash[:16]}...")
@@ -178,7 +230,6 @@ def _inspect_archive(archive: Path, json_output: bool = False, show_tensors: boo
         codecs_used = set(b.codec for b in fentry.blocks)
         print(f"    Codecs: {', '.join(sorted(codecs_used))}")
 
-        # Show tensor-aware info if available
         if fentry.tensor_count > 0:
             print(f"    Tensors: {fentry.tensor_count}")
             print(f"    Dtypes: {', '.join(fentry.dtype_summary)}")
@@ -192,6 +243,54 @@ def _inspect_archive(archive: Path, json_output: bool = False, show_tensors: boo
                 print(f"      ... and {len(fentry.tensor_entries) - shown} more tensors")
 
 
+def _get_compression_summary(fentry: object) -> dict:
+    """Get compression summary for a single file entry."""
+    # fentry is a FileEntry
+    codec_usage: dict[str, int] = {}
+    total_blocks = len(fentry.blocks)  # type: ignore[attr-defined]
+    for block in fentry.blocks:  # type: ignore[attr-defined]
+        codec_usage[block.codec] = codec_usage.get(block.codec, 0) + 1
+
+    return {
+        "blocks": total_blocks,
+        "codec_usage": codec_usage,
+    }
+
+
+def _get_overall_compression_summary(manifest: object) -> dict:
+    """Get overall compression summary from manifest."""
+    manifest = manifest  # type: ignore[assignment]
+    codec_usage: dict[str, int] = {}
+    total_blocks = 0
+    total_files = len(manifest.files)  # type: ignore[attr-defined]
+    tensor_dtypes: dict[str, int] = {}
+    has_tensor_data = False
+
+    for fentry in manifest.files:  # type: ignore[attr-defined]
+        total_blocks += len(fentry.blocks)
+        for block in fentry.blocks:
+            codec_usage[block.codec] = codec_usage.get(block.codec, 0) + 1
+
+        if fentry.tensor_count > 0:
+            has_tensor_data = True
+            for dtype in fentry.dtype_summary:
+                tensor_dtypes[dtype] = tensor_dtypes.get(dtype, 0) + fentry.tensor_count
+
+        # Also count from block-level tensor_dtype
+        for block in fentry.blocks:
+            if block.tensor_dtype:
+                has_tensor_data = True
+                tensor_dtypes[block.tensor_dtype] = tensor_dtypes.get(block.tensor_dtype, 0) + 1
+
+    return {
+        "files": total_files,
+        "blocks": total_blocks,
+        "codec_usage": codec_usage,
+        "tensor_aware": has_tensor_data,
+        "tensor_dtypes": tensor_dtypes if has_tensor_data else {},
+    }
+
+
 def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool = False) -> None:
     """Display AI model format information for a file or directory."""
     if target.is_file():
@@ -199,7 +298,6 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
     else:
         results = inspect_directory(target)
 
-    # Also get directory-level info if it's a directory
     dir_info = None
     if target.is_dir():
         dir_info = _get_directory_model_info(target)
@@ -277,7 +375,6 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
             for fn in file_list:
                 print(f"  {fn}")
     else:
-        # Single file
         if results:
             r = results[0]
             print(f"Detected type: {r.format.value}")
@@ -286,7 +383,6 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
 
     print()
 
-    # Details per file
     if not dir_info or show_tensors:
         for r in results:
             rel = r.path.name if r.path.parent == target else str(r.path.relative_to(target))
@@ -294,7 +390,6 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
             print(f"  {rel} [{r.format.value}]{size_str}")
             print(f"    {r.details}")
 
-            # Show tensor info for safetensors
             if r.tensors and show_tensors:
                 shown = min(10, len(r.tensors))
                 for t in r.tensors[:shown]:
@@ -303,7 +398,6 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
                 if len(r.tensors) > shown:
                     print(f"      ... and {len(r.tensors) - shown} more tensors")
 
-            # Show extra metadata
             if r.extra:
                 for key, value in r.extra.items():
                     if key not in ("header_size",):
@@ -311,12 +405,7 @@ def _inspect_model(target: Path, json_output: bool = False, show_tensors: bool =
 
 
 def _get_directory_model_info(directory: Path) -> dict:
-    """Analyze a directory for model-level information.
-
-    Returns a dict with high-level model detection results including
-    safetensors status, sharding, LoRA detection, GGUF detection,
-    tensor counts, and dtype summaries.
-    """
+    """Analyze a directory for model-level information."""
     from .formats.safetensors import detect_lora_adapter
     from .inspector import ModelFormat
 
@@ -346,21 +435,17 @@ def _get_directory_model_info(directory: Path) -> dict:
         rel = str(r.path.relative_to(directory))
         model_files.append(rel)
 
-    # Check for shard index file
     shard_index = directory / "model.safetensors.index.json"
     if shard_index.is_file():
         is_sharded = True
 
-    # Check for GGUF files
     for f in directory.rglob("*.gguf"):
         if f.is_file():
             has_gguf = True
 
-    # Detect LoRA
     lora_info = detect_lora_adapter(directory)
     is_lora = lora_info.get("is_lora", False)
 
-    # Detect detected type
     if is_lora:
         detected_type = "PEFT/LoRA adapter"
     elif has_safetensors and has_gguf:
@@ -396,7 +481,9 @@ def cmd_bench(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     compare_zipnn = getattr(args, "compare_zipnn", False)
+    compare_codecs = getattr(args, "compare_codecs", False)
     tensor_aware = getattr(args, "tensor_aware", False)
+    codec = getattr(args, "codec", "auto")
 
     result = run_benchmark(
         source,
@@ -404,6 +491,8 @@ def cmd_bench(args: argparse.Namespace) -> None:
         synthetic=getattr(args, "synthetic", False),
         tensor_aware=tensor_aware,
         compare_zipnn=compare_zipnn,
+        compare_codecs=compare_codecs,
+        codec=codec,
     )
 
     if args.json:
@@ -437,6 +526,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Align blocks to tensor boundaries for safetensors files",
     )
+    p_pack.add_argument(
+        "--codec",
+        default="auto",
+        choices=["auto", "byteplane", "floatplane", "zstd", "zlib", "raw"],
+        help="Compression codec (default: auto)",
+    )
     p_pack.set_defaults(func=cmd_pack)
 
     # unpack
@@ -466,6 +561,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show detailed tensor information",
     )
+    p_inspect.add_argument(
+        "--compression",
+        action="store_true",
+        help="Show compression summary with codec usage",
+    )
     p_inspect.set_defaults(func=cmd_inspect)
 
     # bench
@@ -481,9 +581,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use tensor-aware compression mode",
     )
     p_bench.add_argument(
+        "--codec",
+        default="auto",
+        choices=["auto", "byteplane", "floatplane", "zstd", "zlib", "raw"],
+        help="Compression codec (default: auto)",
+    )
+    p_bench.add_argument(
         "--compare-zipnn",
         action="store_true",
         help="Compare with ZipNN if available",
+    )
+    p_bench.add_argument(
+        "--compare-codecs",
+        action="store_true",
+        help="Compare all available codecs",
     )
     p_bench.set_defaults(func=cmd_bench)
 

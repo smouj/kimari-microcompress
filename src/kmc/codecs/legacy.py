@@ -1,4 +1,9 @@
-"""Compression codecs: zstd (preferred), zlib (fallback), raw (passthrough)."""
+"""Legacy codec interface: backward-compatible compression API.
+
+This module preserves the original CodecId enum and compress_block/
+decompress_block functions used by v0.2/v0.3 archives. New code
+should use the codec subpackage directly.
+"""
 
 from __future__ import annotations
 
@@ -21,11 +26,13 @@ class CodecId(str, Enum):
     ZSTD = "zstd"
     ZLIB = "zlib"
     RAW = "raw"
+    BYTEPLANE = "byteplane"
+    FLOATPLANE = "floatplane"
 
 
 @dataclass(frozen=True)
 class CodecResult:
-    """Result of a compression/decompression operation."""
+    """Result of a compression/decompression operation (legacy interface)."""
 
     data: bytes
     codec: CodecId
@@ -34,21 +41,20 @@ class CodecResult:
 
     @property
     def ratio(self) -> float:
-        """Compression ratio (smaller is better; 1.0 = no compression)."""
         if self.original_size == 0:
             return 1.0
         return self.compressed_size / self.original_size
 
 
 class Codec(Protocol):
-    """Protocol for compression codecs."""
+    """Protocol for compression codecs (legacy interface)."""
 
     def compress(self, data: bytes, level: int = 3) -> CodecResult: ...
     def decompress(self, data: bytes, original_size: int) -> CodecResult: ...
 
 
 class ZstdCodec:
-    """Zstandard compression codec — preferred for best ratio and speed."""
+    """Zstandard compression codec."""
 
     def compress(self, data: bytes, level: int = 3) -> CodecResult:
         if not _HAS_ZSTD:
@@ -76,7 +82,7 @@ class ZstdCodec:
 
 
 class ZlibCodec:
-    """zlib compression codec — fallback when zstd is unavailable."""
+    """zlib compression codec."""
 
     def compress(self, data: bytes, level: int = 6) -> CodecResult:
         compressed = zlib.compress(data, level=level)
@@ -98,7 +104,7 @@ class ZlibCodec:
 
 
 class RawCodec:
-    """Passthrough codec — stores data uncompressed when compression doesn't help."""
+    """Passthrough codec."""
 
     def compress(self, data: bytes, level: int = 0) -> CodecResult:
         return CodecResult(
@@ -118,38 +124,38 @@ class RawCodec:
 
 
 def select_codec(data: bytes, block_size: int = 256 * 1024) -> Codec:
-    """Select the best codec for the given data.
-
-    Uses zstd if available, falls back to zlib. If the compressed output
-    would not be smaller than the original, RawCodec is recommended instead.
-    """
+    """Select the best codec for the given data."""
     if _HAS_ZSTD:
         return ZstdCodec()
     return ZlibCodec()
 
 
 def compress_block(data: bytes, level: int = 3) -> CodecResult:
-    """Compress a block using the best available codec.
-
-    If compression doesn't reduce size, falls back to raw storage.
-    """
+    """Compress a block using the best available codec."""
     codec = select_codec(data)
     result = codec.compress(data, level=level)
-
-    # If compression didn't help, store raw
     if result.compressed_size >= result.original_size:
         raw = RawCodec()
         return raw.compress(data)
-
     return result
 
 
-def decompress_block(data: bytes, codec_id: CodecId, original_size: int) -> CodecResult:
+def decompress_block(data: bytes, codec_id: CodecId | str, original_size: int) -> CodecResult:
     """Decompress a block given its codec identifier and original size."""
-    codecs: dict[CodecId, Codec] = {
-        CodecId.ZSTD: ZstdCodec(),
-        CodecId.ZLIB: ZlibCodec(),
-        CodecId.RAW: RawCodec(),
+    codec_str = codec_id.value if isinstance(codec_id, CodecId) else str(codec_id)
+
+    if codec_str in ("byteplane", "floatplane"):
+        raise ValueError(
+            f"Codec '{codec_str}' requires codec_metadata from the manifest. "
+            f"Use the new archive decompression API for v0.4+ archives."
+        )
+
+    codecs_map: dict[str, Codec] = {
+        "zstd": ZstdCodec(),
+        "zlib": ZlibCodec(),
+        "raw": RawCodec(),
     }
-    codec = codecs[codec_id]
+    codec = codecs_map.get(codec_str)
+    if codec is None:
+        raise ValueError(f"Unsupported codec: {codec_str!r}")
     return codec.decompress(data, original_size)

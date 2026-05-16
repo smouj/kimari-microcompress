@@ -70,7 +70,29 @@ kmc pack ./models/gpt2 ./models/gpt2.kmc --tensor-aware
 
 # With custom compression level
 kmc pack ./models/gpt2 ./models/gpt2.kmc --tensor-aware -l 9
+
+# With a specific codec (v0.4+)
+kmc pack ./models/gpt2 ./models/gpt2.kmc --codec byteplane
+kmc pack ./models/gpt2 ./models/gpt2.kmc --codec floatplane --tensor-aware
+
+# Automatic codec selection (default, v0.4+)
+kmc pack ./models/gpt2 ./models/gpt2.kmc --codec auto --tensor-aware
 ```
+
+### Choosing a Codec (v0.4+)
+
+The `--codec` flag controls which compression codec is used:
+
+| Codec | Description | Best For |
+|-------|-------------|----------|
+| `auto` | Try all candidates, pick smallest per block (default) | General use, mixed-dtype models |
+| `byteplane` | Byte-plane separation + zstd/zlib | BF16/FP16/FP32 tensor data |
+| `floatplane` | Sign/exponent/mantissa separation + zstd/zlib | BF16/FP16/FP32 tensor data |
+| `zstd` | Pure zstd compression without transformation | General data, non-float types |
+| `zlib` | Pure zlib compression | Fallback, always available |
+| `raw` | No compression | Already-compressed data, baselines |
+
+**Recommendation:** Use `--codec auto` (the default) for best results. The automatic selector will try tensor-aware codecs for floating-point data and fall back to zstd/zlib for other data types.
 
 ## Step 4: Verify the Archive
 
@@ -140,6 +162,26 @@ If ZipNN is installed, you'll see a side-by-side comparison:
 
 **Important**: The comparison is a measurement, not a claim that KMC is superior or inferior to ZipNN. Results depend on model type, data format, compression level, and hardware.
 
+## Step 7: Compare Codecs (v0.4+)
+
+The `--compare-codecs` flag benchmarks all available codecs on the same data:
+
+```bash
+# Compare all codecs
+kmc bench ./models/gpt2 ./models/gpt2-bench.kmc --compare-codecs
+
+# Compare codecs with JSON output
+kmc bench ./models/gpt2 ./models/gpt2-bench.kmc --compare-codecs --json --output codec-comparison.json
+```
+
+You can also use the dedicated benchmark script for more detailed codec comparison:
+
+```bash
+python scripts/bench_small_hf_model.py ./models/gpt2
+```
+
+See [REAL_MODEL_BENCHMARK.md](REAL_MODEL_BENCHMARK.md) for details.
+
 ## Working with Sharded Models
 
 Large models are often split into multiple shard files:
@@ -201,10 +243,16 @@ kmc pack ./models/gpt2 ./models/gpt2.kmc --tensor-aware
 # 4. Verify
 kmc verify ./models/gpt2.kmc
 
-# 5. Benchmark with ZipNN comparison
+# 5. Inspect compression summary (v0.4+)
+kmc inspect ./models/gpt2.kmc --compression
+
+# 6. Benchmark with codec comparison
+kmc bench ./models/gpt2 ./models/gpt2-bench.kmc --compare-codecs
+
+# 7. Benchmark with ZipNN comparison
 kmc bench ./models/gpt2 ./models/gpt2-bench.kmc --compare-zipnn --json --output reports/gpt2-bench.json
 
-# 6. When needed, decompress
+# 8. When needed, decompress
 kmc unpack ./models/gpt2.kmc ./models/gpt2-restored
 ```
 
@@ -214,7 +262,7 @@ It is important to understand the limitations of KMC when working with Hugging F
 
 ### KMC does NOT reduce VRAM during inference
 
-KMC compresses files for storage and transfer. To use a model, you must decompress it first. The model will consume the same amount of VRAM whether it was previously compressed or not. If you need smaller VRAM usage, use quantization techniques (GGUF Q4_K, GPTQ, AWQ, etc.).
+KMC compresses files for storage and transfer. To use a model, you must decompress it first. The model will consume the same amount of VRAM whether it was previously compressed or not. If you need smaller VRAM usage, use quantization techniques (GGUF Q4_K, GPTQ, AWQ, etc.). This is true even with tensor-aware codecs like BytePlane and FloatPlane — they improve storage compression ratio, not runtime memory usage.
 
 ### KMC does NOT guarantee improved inference speed
 
@@ -250,3 +298,5 @@ If you publish benchmark results comparing KMC with other tools, please follow t
 6. **Make results reproducible**: Provide the exact commands and data used.
 
 The `kmc bench --json --compare-zipnn` command outputs all the information needed for a fair comparison.
+
+The `kmc bench --compare-codecs` command outputs codec comparison results including which codec was actually selected per block in `auto` mode.

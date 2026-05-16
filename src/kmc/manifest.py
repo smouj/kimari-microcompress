@@ -10,6 +10,10 @@ Format version history:
         - TensorEntry records tensor names, dtypes, shapes, byte ranges.
         - FileEntry gains optional tensor_count, dtype_summary, tensor_entries.
         - Backward-compatible: v1 manifests read without errors in v2 readers.
+    - v3 (KMC v0.4): Adds per-block codec_metadata for tensor-aware codecs.
+        - BlockEntry gains optional codec_metadata, tensor_name, tensor_dtype,
+          tensor_shape fields for lossless codec reconstruction.
+        - Backward-compatible: v1/v2 manifests read without errors in v3 readers.
 """
 
 from __future__ import annotations
@@ -17,12 +21,20 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-KMC_MANIFEST_VERSION = 2  # v0.3-alpha with tensor-aware support
+KMC_MANIFEST_VERSION = 3  # v0.4-alpha with per-block codec metadata
 
 
 @dataclass
 class BlockEntry:
-    """A single compressed block within a file."""
+    """A single compressed block within a file.
+
+    v0.4 additions:
+        - codec_metadata: Dict with codec-specific parameters needed for
+          decompression (e.g., transform type, element_size, inner_codec).
+        - tensor_name: Name of the tensor this block belongs to (if known).
+        - tensor_dtype: Dtype of the tensor (e.g., 'BF16', 'FP16', 'FP32').
+        - tensor_shape: Shape of the tensor this block belongs to.
+    """
 
     index: int
     offset: int
@@ -30,6 +42,11 @@ class BlockEntry:
     original_size: int
     codec: str  # CodecId value
     hash: str  # SHA-256 of compressed data
+    # v0.4 fields (optional, for tensor-aware codecs)
+    codec_metadata: dict = field(default_factory=dict)
+    tensor_name: str = ""
+    tensor_dtype: str = ""
+    tensor_shape: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -73,14 +90,15 @@ class KMCManifest:
 
     The format_version field distinguishes between manifest versions:
         - 1: Original format (KMC v0.1-v0.2)
-        - 2: Tensor-aware format (KMC v0.3+)
-    Version 2 manifests are backward-compatible: readers that only understand
-    version 1 can safely ignore the tensor-aware fields.
+        - 2: Tensor-aware format (KMC v0.3)
+        - 3: Per-block codec metadata (KMC v0.4+)
+    Version 3 manifests are backward-compatible: readers that only understand
+    version 1/2 can safely ignore the codec_metadata and tensor fields.
     """
 
     version: int = KMC_MANIFEST_VERSION
     tool: str = "kimari-microcompress"
-    tool_version: str = "0.3.0-alpha"
+    tool_version: str = "0.4.0-alpha"
     created_at: str = ""
     total_original_size: int = 0
     total_compressed_size: int = 0
@@ -94,13 +112,28 @@ class KMCManifest:
     def from_json(cls, raw: str) -> KMCManifest:
         """Deserialize manifest from JSON string.
 
-        Handles both v1 (no tensor fields) and v2 (tensor-aware) manifests.
-        Missing fields default to empty/zero values.
+        Handles v1, v2, and v3 manifests. Missing fields default
+        to empty/zero values for backward compatibility.
         """
         data = json.loads(raw)
         files = []
         for f in data.get("files", []):
-            blocks = [BlockEntry(**b) for b in f.get("blocks", [])]
+            blocks = []
+            for b in f.get("blocks", []):
+                blocks.append(
+                    BlockEntry(
+                        index=b.get("index", 0),
+                        offset=b.get("offset", 0),
+                        compressed_size=b.get("compressed_size", 0),
+                        original_size=b.get("original_size", 0),
+                        codec=b.get("codec", "raw"),
+                        hash=b.get("hash", ""),
+                        codec_metadata=b.get("codec_metadata", {}),
+                        tensor_name=b.get("tensor_name", ""),
+                        tensor_dtype=b.get("tensor_dtype", ""),
+                        tensor_shape=b.get("tensor_shape", []),
+                    )
+                )
             tensor_entries = [TensorEntry(**t) for t in f.get("tensor_entries", [])]
             files.append(
                 FileEntry(

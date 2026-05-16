@@ -8,13 +8,13 @@ Kimari MicroCompress is built on a set of core principles that guide every desig
 
 2. **Byte-exact verification**: SHA-256 hashes are computed at both the file level and the block level, ensuring that every byte of the original input can be verified after decompression. This dual-level hashing catches both large-scale corruption and subtle bit-flips.
 
-3. **Codec flexibility**: The system supports multiple compression codecs (zstd, zlib, raw) and selects the best one per-block. This means that blocks that don't benefit from compression are stored raw, while highly compressible blocks get the full benefit of zstd or zlib.
+3. **Codec flexibility**: The system supports multiple compression codecs (zstd, zlib, raw, byteplane, floatplane) and can automatically select the best one per-block based on tensor metadata. This means that blocks that don't benefit from compression are stored raw, floating-point blocks get tensor-aware codecs, and highly compressible blocks get the full benefit of zstd or zlib.
 
 4. **Block-oriented design**: Files are split into fixed-size blocks (default 256 KiB) before compression. This enables future features like partial decompression (block-loading), parallel compression/decompression, and fine-grained integrity verification.
 
 5. **Manifest-first metadata**: All metadata is stored in a single JSON manifest at the beginning of the archive. This allows tools to inspect the archive without decompressing any data, and makes the format human-readable and debuggable.
 
-6. **Tensor-aware extension**: When `--tensor-aware` mode is enabled, block boundaries are aligned to tensor boundaries in safetensors files, and tensor metadata is recorded in the manifest. This is a structural preparation for future tensor-specific codecs.
+6. **Tensor-aware codecs**: BytePlane and FloatPlane codecs exploit the internal structure of floating-point data (byte positions, sign/exponent/mantissa bits) to improve compressibility before applying an inner codec (zstd or zlib). The automatic selector chooses the best codec per block based on dtype.
 
 7. **Optional dependencies**: Features that require external packages (safetensors, zipnn) degrade gracefully when those packages are not installed. Core functionality never depends on optional packages.
 
@@ -30,13 +30,78 @@ The `archive` module implements the three fundamental operations on `.kmc` archi
 
 The archive format uses a simple sequential layout: magic bytes, manifest length, manifest, then block data. Offsets in the manifest point directly to block positions within the file, enabling random access to individual blocks.
 
-### `codecs.py` — Compression Codecs
+### `codecs/` — Compression Codec Subpackage (v0.4+)
 
-The codec system is designed around a `Codec` protocol with `compress()` and `decompress()` methods. Each codec returns a `CodecResult` containing the compressed/decompressed data, the codec identifier, and size information.
+The codec subpackage is the home for all compression and transformation codecs in KMC. It replaces the flat `codecs.py` module with a structured, extensible architecture that supports tensor-aware codecs.
 
-The `compress_block()` function implements the codec selection logic: it tries the best available codec (zstd if installed, otherwise zlib), and if the compressed output isn't smaller than the input, it falls back to the raw codec. This ensures that already-compressed or random data isn't expanded by the compression attempt.
+#### `codecs/base.py` — Protocol and Data Structures
 
-Codec identifiers are stored as strings in the manifest (`"zstd"`, `"zlib"`, `"raw"`), allowing future codecs to be added without breaking backward compatibility.
+Defines the `Codec` protocol and supporting types:
+
+- **`CodecContext`**: A dataclass carrying tensor-aware hints — `dtype`, `shape`, `tensor_name`, `file_path`, `original_size`, and `block_index`. Codecs use context to make informed decisions (e.g., BytePlane uses `dtype` to determine `element_size`).
+- **`CodecResult`**: A dataclass for compression/decompression output — `codec` name, `payload` bytes, `original_size`, `compressed_size`, and `metadata` dict. The `metadata` field stores codec-specific parameters (transform type, element_size, inner_codec) needed for lossless decompression.
+- **`Codec` protocol**: Defines the `compress(data, *, context)` and `decompress(payload, *, context)` interface with a guaranteed lossless roundtrip: `decompress(compress(data)) == data`.
+
+#### `codecs/byteplane.py` — BytePlane Codec
+
+Lossless byte-plane separation for fixed-width numeric types (BF16/FP16/FP32).
+
+**How it works:**
+1. Determines `element_size` from `CodecContext.dtype` (2 for BF16/FP16, 4 for FP32).
+2. Separates bytes by their position within each element: for FP32 data `[a0,b0,c0,d0,a1,b1,c1,d1,...]`, produces four planes `[a0,a1,...]`, `[b0,b1,...]`, `[c0,c1,...]`, `[d0,d1,...]`.
+3. Concatenates all planes and compresses with an inner codec (zstd preferred, zlib fallback).
+4. Misaligned tail bytes (data length not divisible by `element_size`) are stored separately.
+
+**Why it helps:** Bytes at the same position within floating-point numbers tend to have similar patterns — sign bits cluster, exponent bytes cluster, mantissa bytes cluster. This makes the concatenated planes more compressible than interleaved data.
+
+#### `codecs/floatplane.py` — FloatPlane Codec
+
+Lossless sign/exponent/mantissa bit-level separation for FP16/BF16/FP32.
+
+**How it works:**
+1. Determines dtype from `CodecContext.dtype` and looks up the bit layout (e.g., BF16: 1 sign + 8 exponent + 7 mantissa bits).
+2. Reads each element as an unsigned integer (no float conversion) and extracts sign, exponent, and mantissa bit fields.
+3. Packs each component separately: sign bits are bit-packed (8 per byte), exponents and mantissas use minimal byte widths.
+4. Compresses each plane independently with an inner codec (zstd or zlib).
+5. Payload format: `[sign_len][sign_data][exp_len][exp_data][mantissa_len][mantissa_data][tail_len][tail]`.
+
+**Fallback behavior:** If dtype is not provided or not supported, FloatPlane falls back to BytePlane internally and records `"transform": "byteplane_fallback"` in metadata.
+
+**Why it helps:** Sign bits are often uniform (mostly positive weights), exponents cluster in a narrow range, and mantissa bits have varying entropy. Separating these components allows the inner codec to compress each more efficiently.
+
+#### `codecs/registry.py` — Codec Registry
+
+A central registry for all available codecs, providing:
+
+- `register_codec(name, cls)`: Register a custom codec by name.
+- `get_codec(name, **kwargs)`: Instantiate a codec by name with optional configuration.
+- `list_codecs()`: List all registered codec names.
+- `is_codec_available(name)`: Check if a codec's dependencies are installed.
+- `available_codecs()`: List only codecs with dependencies met.
+
+Currently registered codecs: `raw`, `zlib`, `zstd`, `byteplane`, `floatplane`.
+
+#### `codecs/selector.py` — Automatic Codec Selector
+
+Selects the best codec per block based on tensor metadata:
+
+- **Candidate chains**: dtype-specific ordered lists of codecs to try:
+  - BF16/FP16/FP32: `floatplane → byteplane → zstd → zlib → raw`
+  - INT8/INT16/INT32/UINT*: `zstd → zlib → raw`
+  - GGUF files: `zstd → zlib → raw`
+  - Unknown dtype: `zstd → zlib → raw`
+- **Selection process**: For each candidate, compress the data, verify the roundtrip (decompress matches original), and record the result. The smallest compressed result wins.
+- **Forced codec**: The `--codec` CLI flag overrides the automatic selection, trying only the specified codec.
+- **Fallback**: If no codec succeeds, raw passthrough is used.
+- **`SelectionResult`**: Returns the best `CodecResult`, codec name, candidates tried, and roundtrip verification status.
+
+#### `codecs/legacy.py` — Legacy Codec Interface
+
+Preserves the original `CodecId` enum and `compress_block`/`decompress_block` functions used by v0.2/v0.3 archives. New code should use the codec subpackage directly. The legacy module raises a `ValueError` for `byteplane` and `floatplane` codecs, directing users to the new archive API that provides codec metadata.
+
+#### `codecs/raw.py`, `codecs/zlib_codec.py`, `codecs/zstd_codec.py` — Standard Codecs
+
+These implement the `Codec` protocol for passthrough, zlib, and zstd compression respectively. They are used both directly and as inner codecs by BytePlane and FloatPlane.
 
 ### `manifest.py` — Archive Metadata
 
@@ -44,10 +109,11 @@ The manifest uses Python dataclasses with a clear hierarchy: `KMCManifest` conta
 
 Key design choices:
 - POSIX-style paths are used for cross-platform compatibility.
-- The manifest version field distinguishes between v1 (original) and v2 (tensor-aware) formats.
+- The manifest version field distinguishes between v1 (original), v2 (tensor-aware), and v3 (per-block codec metadata) formats.
 - The `tool` and `tool_version` fields enable provenance tracking.
 - `TensorEntry` records tensor name, dtype, shape, byte_offset, and byte_size for safetensors files.
-- v2 manifests are backward-compatible with v1 readers (tensor fields default to empty/zero).
+- v3 `BlockEntry` adds `codec_metadata` (dict for codec-specific reconstruction parameters), `tensor_name`, `tensor_dtype`, and `tensor_shape` fields.
+- v3 manifests are backward-compatible with v1/v2 readers (new fields default to empty/zero).
 
 ### `hashing.py` — Integrity Verification
 
@@ -147,30 +213,46 @@ Source safetensors file
     Compute block boundaries
     aligned to tensor boundaries
         ↓
-    Compress each block
+    For each block:
+        Build CodecContext (dtype, shape, tensor_name)
+            ↓
+        Select codec via selector.py
+        (dtype-based candidate chain)
+            ↓
+        Compress + verify roundtrip
+            ↓
+        Record codec_metadata in BlockEntry
         ↓
     Build manifest with
-    TensorEntry records
+    TensorEntry + codec_metadata
         ↓
     Write archive
 ```
 
 ## Future Architecture Considerations
 
-### Tensor-Specific Codecs (v0.4)
+### Tensor-Specific Codecs (v0.4 — Completed)
 
-With tensor metadata available in the manifest, future versions can implement codecs that exploit the structure of specific data types:
+The codec subpackage introduced in v0.4 provides the first tensor-aware codecs:
 
-- **BF16/FP16 separation**: Split weights into sign, exponent, and mantissa components, compress each separately. Exponents tend to cluster, mantissas have different entropy patterns.
-- **Per-dtype block selection**: Use different codec parameters for BF16 blocks vs FP32 blocks vs INT8 blocks.
+- **BytePlane**: Byte-plane separation for BF16/FP16/FP32 data.
+- **FloatPlane**: Sign/exponent/mantissa bit-level separation for FP16/BF16/FP32.
+- **Automatic selector**: dtype-based candidate chains with roundtrip verification.
+
+Future codec improvements may include:
 - **Tensor-specific dictionaries**: Build zstd dictionaries from tensors of the same shape and dtype across the model.
+- **XOR delta encoding**: Encode differences between adjacent rows/columns of weight matrices.
+- **Quantization-aware compression**: Exploit the structure of GGUF quantization levels.
 
 ### Block-Level Loading
 
-The current design stores all blocks sequentially, but the manifest already contains per-block offsets. A future "block server" could serve individual blocks on demand, enabling:
+The current design stores all blocks sequentially, but the manifest already contains per-block offsets and codec metadata. A future "block server" could serve individual blocks on demand, enabling:
 - Loading specific layers of a model without downloading the entire file.
 - Streaming decompression for large models.
 - Memory-mapped access to specific tensor regions.
+- **Runtime compressed loading**: Decompress blocks on-the-fly during inference (research phase).
+
+> **Important:** Block-level loading does NOT reduce inference VRAM. The decompressed blocks still occupy the same memory. Runtime compressed loading (keeping blocks compressed in memory) is future research.
 
 ### Parallel Processing
 

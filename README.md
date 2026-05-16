@@ -16,16 +16,20 @@
 - **No fixed compression ratios should be assumed without real benchmarks.** Results vary significantly by model format, data type, and content. Synthetic benchmarks do not represent real-world ratios.
 - **KMC is not a replacement for quantization.** If you need smaller models for inference, use quantization (GGUF Q4_K, GPTQ, AWQ, etc.). KMC is complementary: it compresses the already-quantized files for storage/transfer.
 
-## KMC v0.3.0-alpha Focus
+## KMC v0.4.0-alpha Focus
 
-This release focuses on real safetensors support and professional tooling:
+This release introduces the first real tensor-aware lossless codecs and automatic codec selection:
 
-- **Real safetensors metadata inspection** — Read tensor names, dtypes, shapes, and byte offsets without loading weights
-- **Tensor-aware manifest entries** — Block boundaries aligned to tensor boundaries with `--tensor-aware`
-- **Optional ZipNN benchmark comparison** — Measure against ZipNN with fair, reproducible results
-- **Minimal GGUF parser** — Header parsing with version, endianness, and tensor count detection
-- **Kimari CLI adapter preparation** — Clean integration layer for `kimari compress/decompress/verify-compress/bench-compress`
-- **Hugging Face workflow documentation** — Complete guide for compressing models from Hugging Face Hub
+- **BytePlane codec** — Lossless byte-plane separation for BF16/FP16/FP32 data, reorganizing bytes by position within each element before compression
+- **FloatPlane codec** — Lossless sign/exponent/mantissa separation for FP16/BF16/FP32, exploiting floating-point bit-level structure
+- **Automatic codec selector** — dtype-based candidate chains that try codecs in priority order and pick the smallest verified result per block
+- **Per-block codec metadata (v3 manifest)** — Each block carries `codec_metadata`, `tensor_name`, `tensor_dtype`, and `tensor_shape` for lossless reconstruction
+- **`--codec auto|byteplane|floatplane|zstd|zlib|raw`** flag for `kmc pack` and `kmc bench`
+- **`--compression`** flag for `kmc inspect` to show per-archive codec usage summary
+- **`--compare-codecs`** flag for `kmc bench` to benchmark all available codecs side by side
+- **Codec comparison benchmarks** — Measure BytePlane, FloatPlane, zstd, zlib, and raw on the same data
+
+> **⚠️ Important disclaimer:** KMC v0.4 still does not reduce inference VRAM. It compresses model storage and transfer artifacts. Runtime compressed loading remains future work.
 
 ## Overview
 
@@ -45,9 +49,13 @@ Kimari MicroCompress (KMC) is an experimental tool for **lossless, reversible co
 | `kmc inspect --json` — JSON output for scripting | ✅ Working |
 | `kmc inspect --tensors` — Detailed tensor information | ✅ Working |
 | `kmc bench` — Benchmark with codec comparison | ✅ Working |
+| `kmc bench --compare-codecs` — Multi-codec comparison | ✅ Working |
 | `kmc bench --compare-zipnn` — ZipNN comparison | ✅ Working |
+| `kmc pack/bench --codec auto|byteplane|floatplane|zstd|zlib|raw` | ✅ Working |
+| `kmc inspect --compression` — Codec usage summary | ✅ Working |
 | `.kmc` archive format with JSON manifest | ✅ Working |
-| zstd / zlib / raw codec selection | ✅ Working |
+| zstd / zlib / raw / byteplane / floatplane codec selection | ✅ Working |
+| Automatic codec selector (dtype-based) | ✅ Working |
 | SHA-256 per-file and per-block hashing | ✅ Working |
 | 256 KiB micro-blocks (configurable) | ✅ Working |
 | AI format detection (safetensors, GGUF, LoRA, shards, etc.) | ✅ Working |
@@ -62,7 +70,9 @@ Kimari MicroCompress (KMC) is an experimental tool for **lossless, reversible co
 | Kimari CLI integration adapters | ✅ Working |
 | `safetensors` optional dependency support | ✅ Working |
 | `zipnn` optional dependency support | ✅ Working |
-| Real model benchmarks | 🔜 Planned |
+| Real model benchmarks (bench_small_hf_model.py) | ✅ Working |
+| BytePlane codec (byte-plane separation) | ✅ Working |
+| FloatPlane codec (sign/exp/mantissa separation) | ✅ Working |
 | GGUF block-level compression | 🔬 Research |
 | Block-loading (partial decompression) | 🔬 Research |
 | Checkpoint/gradients compression | 🔬 Research |
@@ -102,6 +112,10 @@ kmc pack ./my-model ./my-model.kmc
 # Pack with tensor-aware mode (recommended for safetensors)
 kmc pack ./my-model ./my-model.kmc --tensor-aware
 
+# Pack with a specific codec
+kmc pack ./my-model ./my-model.kmc --codec byteplane
+kmc pack ./my-model ./my-model.kmc --codec floatplane
+
 # Verify integrity (full report)
 kmc verify ./my-model.kmc
 
@@ -119,6 +133,12 @@ kmc unpack ./my-model.kmc ./restored-model/
 
 # Run benchmark with JSON output
 kmc bench ./my-model ./my-model-bench.kmc --json --output report.json
+
+# Benchmark with codec comparison (tries all codecs)
+kmc bench ./my-model ./my-model-bench.kmc --compare-codecs
+
+# Benchmark with a specific codec
+kmc bench ./my-model ./my-model-bench.kmc --codec floatplane
 
 # Benchmark with ZipNN comparison
 kmc bench ./my-model ./my-model-bench.kmc --compare-zipnn
@@ -138,6 +158,7 @@ The `.kmc` format is designed for verifiable, block-oriented storage:
 │  - version, tool info              │
 │  - file entries with paths & hashes│
 │  - block entries with codecs       │
+│  - per-block codec_metadata (v0.4+)│
 │  - tensor entries (v0.3+, optional)│
 │  - total sizes and ratios          │
 ├─────────────────────────────────────┤
@@ -170,14 +191,25 @@ src/kmc/
 ├── archive.py          # Core pack/unpack/verify with security checks
 ├── benchmark.py        # Performance benchmarking with codec + ZipNN comparison
 ├── cli.py              # Command-line interface
-├── codecs.py           # Compression codecs (zstd, zlib, raw)
+├── codecs/             # Compression codec subpackage (v0.4+)
+│   ├── __init__.py     # Public codec API
+│   ├── base.py         # Codec protocol, CodecContext, CodecResult
+│   ├── byteplane.py    # BytePlane codec (byte-plane separation)
+│   ├── floatplane.py   # FloatPlane codec (sign/exp/mantissa separation)
+│   ├── registry.py     # Codec registry (discover/instantiate by name)
+│   ├── selector.py     # Automatic codec selector (dtype-based candidates)
+│   ├── legacy.py       # Legacy CodecId/compress_block API (v0.2/v0.3 compat)
+│   ├── raw.py          # Raw passthrough codec
+│   ├── zlib_codec.py   # zlib codec
+│   └── zstd_codec.py   # zstd codec
+├── codecs.py           # Legacy codec module (see codecs/ subpackage)
 ├── formats/
 │   ├── __init__.py     # Format module registry
 │   ├── safetensors.py  # Safetensors metadata, shards, LoRA detection
 │   └── gguf.py         # GGUF header parsing
 ├── hashing.py          # SHA-256 integrity hashing
 ├── inspector.py        # AI model format detection with metadata
-├── manifest.py         # KMC manifest (JSON metadata with tensor entries)
+├── manifest.py         # KMC manifest (v3: per-block codec_metadata)
 ├── tensor_inspector.py # Legacy safetensors metadata (see formats/safetensors.py)
 ├── gguf.py             # Legacy GGUF module (see formats/gguf.py)
 └── integrations/
@@ -202,7 +234,8 @@ KMC's approach is informed by research and industry practice:
 - [Security Model](docs/SECURITY_MODEL.md) — Threat model and mitigations
 - [Roadmap](docs/ROADMAP.md) — Development priorities
 - [Benchmark Plan](docs/BENCHMARK_PLAN.md) — Performance testing strategy
-- [Research Notes](docs/RESEARCH_NOTES.md) — Technical references
+- [Research Notes](docs/RESEARCH_NOTES.md) — Technical references and codec design rationale
+- [Real Model Benchmark](docs/REAL_MODEL_BENCHMARK.md) — Running benchmarks with HuggingFace models
 - [Kimari Integration](docs/KIMARI_INTEGRATION.md) — Integration with Kimari CLI
 - [Hugging Face Workflow](docs/HUGGINGFACE_WORKFLOW.md) — Working with Hugging Face models
 
